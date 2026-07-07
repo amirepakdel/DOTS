@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DTOS AI — Investment Analyst</title>
+    <title>DTOS — Digital Twin Operating System</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<base target="_blank">
 <base target="_blank">
 </head>
 <body>
@@ -14,8 +15,8 @@
             <div class="nav-brand">
                 <div class="logo">🏢</div>
                 <div class="brand-text">
-                    <div class="brand-name">DTOS AI</div>
-                    <div class="brand-sub">Investment Analyst</div>
+                    <div class="brand-name">DTOS</div>
+                    <div class="brand-sub">Regulated Autonomous Operator</div>
                 </div>
             </div>
 
@@ -52,7 +53,7 @@
                 <div class="panel-header">
                     <div class="header-left">
                         <h2>Operations Center</h2>
-                        <span class="header-hint">Describe any deal, negotiation, or situation</span>
+                        <span class="header-hint">Describe any meeting, governance scenario, or advisory situation</span>
                     </div>
                     <div class="header-actions">
                         <button id="clearBtn" class="btn-ghost" title="Clear conversation (Ctrl+L)">
@@ -64,12 +65,12 @@
                     <div id="chatBox" class="chat-box">
                         <div class="message assistant welcome">
                             <div class="bubble">
-                                <div class="bubble-title">Welcome to DTOS AI</div>
-                                <p>I'm your investment analyst. Describe any deal, negotiation, or situation and I'll analyze it using your configured policies and knowledge base.</p>
+                                <div class="bubble-title">Welcome to DTOS</div>
+                                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
                                 <div class="quick-pills">
-                                    <button class="quick-pill" onclick="quickAsk('I have a distressed property with $200k debt. Should I buy?')">Distressed + debt</button>
-                                    <button class="quick-pill" onclick="quickAsk('The seller is emotional and wants to close fast. How do I negotiate?')">Emotional seller</button>
-                                    <button class="quick-pill" onclick="quickAsk('A bank REO is listed at 80% of ARV. What is my max offer?')">Bank REO pricing</button>
+                                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
+                                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
+                                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
                                 </div>
                             </div>
                         </div>
@@ -84,7 +85,7 @@
                             <button id="flagBtn" class="btn-ghost-sm" title="Flag last question for admin review">🚩 Flag</button>
                         </div>
                         <div class="input-row">
-                            <textarea id="userInput" placeholder="Describe your deal situation..." rows="1"></textarea>
+                            <textarea id="userInput" placeholder="Describe your meeting, governance, or advisory situation..." rows="1"></textarea>
                             <button id="sendBtn" class="btn-primary" title="Send (Enter)">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                             </button>
@@ -115,21 +116,21 @@
             <div id="settingsPanel" class="panel">
                 <div class="panel-header">
                     <div class="header-left">
-                        <h2>Settings & Configuration</h2>
-                        <span class="header-hint">Customize how the AI behaves and responds</span>
+                        <h2>Governance & Configuration</h2>
+                        <span class="header-hint">Customize the Digital Twin's identity, boundaries, and safety controls</span>
                     </div>
                 </div>
                 <div class="settings-grid">
                     <div class="settings-card">
-                        <h3>🏢 Company Identity</h3>
+                        <h3>🏢 Digital Twin Identity</h3>
                         <div class="form-group">
                             <label>Company Name</label>
                             <input type="text" id="cfgCompany" placeholder="DTOS Capital">
                         </div>
                         <div class="form-group">
                             <label>System Prompt</label>
-                            <textarea id="cfgSystem" rows="3" placeholder="Base system prompt..."></textarea>
-                            <span class="field-hint">Defines the AI's core role and expertise</span>
+                            <textarea id="cfgSystem" rows="3" placeholder="Defines the Digital Twin's core role, advisory scope, and governance boundaries..."></textarea>
+                            <span class="field-hint">Defines the Digital Twin's core role, advisory scope, and governance boundaries</span>
                         </div>
                         <div class="form-group">
                             <label>Personality Traits</label>
@@ -138,7 +139,7 @@
                     </div>
 
                     <div class="settings-card">
-                        <h3>🛡️ Policy Boundaries</h3>
+                        <h3>🛡️ Governance Boundaries (Never List)</h3>
                         <div class="form-group">
                             <label>Allowed Topics</label>
                             <textarea id="cfgAllowed" rows="2"></textarea>
@@ -150,19 +151,19 @@
                         <div class="form-group">
                             <label>Response Rules</label>
                             <textarea id="cfgRules" rows="3"></textarea>
-                            <span class="field-hint">How the AI should format and structure answers</span>
+                            <span class="field-hint">How the Digital Twin should format answers, cite evidence, and enforce authority hierarchy</span>
                         </div>
                     </div>
 
                     <div class="settings-card">
-                        <h3>⚡ Financial & Model</h3>
+                        <h3>⚡ AI Engine & Safety Controls</h3>
                         <div class="form-row">
                             <div class="form-group half">
-                                <label>Min Margin %</label>
+                                <label>Min Confidence %</label>
                                 <input type="number" id="cfgMargin" value="25" min="0" max="100">
                             </div>
                             <div class="form-group half">
-                                <label>Max History</label>
+                                <label>Max Context History</label>
                                 <input type="number" id="cfgHistory" value="10" min="1" max="50">
                             </div>
                         </div>
@@ -188,10 +189,10 @@
                             </select>
                         </div>
                         
-                        <h3 style="margin-top:24px">🔊 Voice (Cartesia)</h3>
+                        <h3 style="margin-top:24px">🔊 Voice Engine (Cartesia)</h3>
                         <div class="form-group">
                             <label>Cartesia Voice ID</label>
-                            <input type="text" id="cfgVoiceId" placeholder="e07c00bc-4134-4eae-9ea4-1a55fb45746b">
+                            <input type="text" id="cfgVoiceId" placeholder="a5136bf9-224c-4d76-b823-52bd5efcffcc">
                             <span class="field-hint">Default voice for TTS playback</span>
                         </div>
                         <div class="form-row">
@@ -213,7 +214,7 @@
                     </div>
 
                     <div class="settings-card stats-card">
-                        <h3>📊 System Overview</h3>
+                        <h3>📊 DTOS System Overview</h3>
                         <div class="stats-grid" id="statsGrid">
                             <div class="stat-box">
                                 <div class="stat-value" id="statDecisions">-</div>
@@ -248,13 +249,13 @@
             <div id="teachPanel" class="panel">
                 <div class="panel-header">
                     <div class="header-left">
-                        <h2>Teaching Center</h2>
-                        <span class="header-hint">Train the AI with decision patterns, behaviors, and authority rules</span>
+                        <h2>Knowledge & Governance Center</h2>
+                        <span class="header-hint">Train the Digital Twin with decision patterns, persona behaviors, and authority rules</span>
                     </div>
                     <div class="sub-tabs">
-                        <button class="sub-tab active" data-sub="decisions">📊 Decisions</button>
-                        <button class="sub-tab" data-sub="behaviors">🎭 Behaviors</button>
-                        <button class="sub-tab" data-sub="authority">🛡️ Authority</button>
+                        <button class="sub-tab active" data-sub="decisions">📊 Decision Patterns</button>
+                        <button class="sub-tab" data-sub="behaviors">🎭 Persona Behaviors</button>
+                        <button class="sub-tab" data-sub="authority">🛡️ Authority & Safety</button>
                     </div>
                 </div>
 
@@ -265,18 +266,18 @@
                             <div class="card">
                                 <h3>➕ Add Decision Pattern</h3>
                                 <div class="form-group">
-                                    <label>Question <span class="req">*</span></label>
-                                    <textarea id="decQuestion" rows="2" placeholder="Should we buy this property with $200k debt attached?"></textarea>
+                                    <label>Scenario <span class="req">*</span></label>
+                                    <textarea id="decQuestion" rows="2" placeholder="Should the Digital Twin agree to a board request for a financial commitment?"></textarea>
                                     <span class="field-error" id="errDecQuestion"></span>
                                 </div>
                                 <div class="form-group">
                                     <label>Context <span class="req">*</span></label>
-                                    <textarea id="decContext" rows="2" placeholder="Property is in foreclosure..."></textarea>
+                                    <textarea id="decContext" rows="2" placeholder="High-stakes board meeting with investors requesting binding commitments..."></textarea>
                                     <span class="field-error" id="errDecContext"></span>
                                 </div>
                                 <div class="form-group">
                                     <label>Ideal Answer <span class="req">*</span></label>
-                                    <textarea id="decAnswer" rows="2" placeholder="Reject unless price drops below..."></textarea>
+                                    <textarea id="decAnswer" rows="2" placeholder="Escalate to human oversight. Never commit without founder approval..."></textarea>
                                     <span class="field-error" id="errDecAnswer"></span>
                                 </div>
                                 <div class="form-row">
@@ -314,15 +315,15 @@
                                 </div>
                                 <div class="form-group">
                                     <label>Reasoning <span class="req">*</span></label>
-                                    <textarea id="decReasoning" rows="3" placeholder="Detailed financial reasoning..."></textarea>
+                                    <textarea id="decReasoning" rows="3" placeholder="Detailed governance reasoning: authority level, evidence sources, and fallback behavior..."></textarea>
                                     <span class="field-error" id="errDecReasoning"></span>
                                 </div>
-                                <button id="addDecBtn" class="btn-primary full">➕ Add Decision</button>
+                                <button id="addDecBtn" class="btn-primary full">➕ Add Decision Pattern</button>
                             </div>
                         </div>
                         <div class="teach-list">
                             <div class="list-toolbar">
-                                <h3>📚 Decision Knowledge Base</h3>
+                                <h3>📚 Governance Decision Base</h3>
                                 <div class="toolbar-right">
                                     <input type="text" id="decSearch" class="search-input" placeholder="🔍 Search decisions...">
                                     <select id="decFilter" class="filter-select">
@@ -346,10 +347,10 @@
                     <div class="teach-layout">
                         <div class="teach-form">
                             <div class="card">
-                                <h3>➕ Add Behavior Style</h3>
+                                <h3>➕ Add Persona Behavior</h3>
                                 <div class="form-group">
                                     <label>Situation <span class="req">*</span></label>
-                                    <textarea id="behSituation" rows="2" placeholder="Seller is emotionally stressed..."></textarea>
+                                    <textarea id="behSituation" rows="2" placeholder="Stakeholder is emotionally stressed during a critical meeting..."></textarea>
                                     <span class="field-error" id="errBehSituation"></span>
                                 </div>
                                 <div class="form-group">
@@ -359,7 +360,7 @@
                                 </div>
                                 <div class="form-group">
                                     <label>Example Response <span class="req">*</span></label>
-                                    <textarea id="behExample" rows="3" placeholder="I understand your urgency..."></textarea>
+                                    <textarea id="behExample" rows="3" placeholder="I understand the urgency of this matter. Let me review the evidence and governance protocols before responding..."></textarea>
                                     <span class="field-error" id="errBehExample"></span>
                                 </div>
                                 <div class="form-group">
@@ -372,12 +373,12 @@
                                     <textarea id="behDont" rows="2" placeholder="overpromise, rush decision..."></textarea>
                                     <span class="field-error" id="errBehDont"></span>
                                 </div>
-                                <button id="addBehBtn" class="btn-primary full">➕ Add Behavior</button>
+                                <button id="addBehBtn" class="btn-primary full">➕ Add Persona Behavior</button>
                             </div>
                         </div>
                         <div class="teach-list">
                             <div class="list-toolbar">
-                                <h3>🎭 Behavior Styles</h3>
+                                <h3>🎭 Persona Behavior Styles</h3>
                                 <input type="text" id="behSearch" class="search-input" placeholder="🔍 Search behaviors...">
                             </div>
                             <div id="behaviorsList" class="materials-list"></div>
@@ -390,10 +391,10 @@
                     <div class="teach-layout">
                         <div class="teach-form">
                             <div class="card">
-                                <h3>➕ Add Authority Rule</h3>
+                                <h3>➕ Add Authority & Safety Rule</h3>
                                 <div class="form-group">
                                     <label>Action Type <span class="req">*</span></label>
-                                    <input type="text" id="authAction" placeholder="pricing / discount approval below 25% margin">
+                                    <input type="text" id="authAction" placeholder="financial commitment / contract signing / binding agreement">
                                     <span class="field-error" id="errAuthAction"></span>
                                 </div>
                                 <div class="form-group">
@@ -406,20 +407,20 @@
                                 </div>
                                 <div class="form-group">
                                     <label>Condition <span class="req">*</span></label>
-                                    <textarea id="authCondition" rows="2" placeholder="only founder can approve..."></textarea>
+                                    <textarea id="authCondition" rows="2" placeholder="only founder can approve; Digital Twin must escalate and refuse..."></textarea>
                                     <span class="field-error" id="errAuthCondition"></span>
                                 </div>
                                 <div class="form-group">
                                     <label>Fallback Behavior <span class="req">*</span></label>
-                                    <textarea id="authFallback" rows="2" placeholder="escalate to founder with..."></textarea>
+                                    <textarea id="authFallback" rows="2" placeholder="escalate to founder with full context and evidence log; refuse autonomous action..."></textarea>
                                     <span class="field-error" id="errAuthFallback"></span>
                                 </div>
-                                <button id="addAuthBtn" class="btn-primary full">➕ Add Authority Rule</button>
+                                <button id="addAuthBtn" class="btn-primary full">➕ Add Authority & Safety Rule</button>
                             </div>
                         </div>
                         <div class="teach-list">
                             <div class="list-toolbar">
-                                <h3>🛡️ Authority Rules</h3>
+                                <h3>🛡️ Authority & Safety Rules</h3>
                                 <input type="text" id="authSearch" class="search-input" placeholder="🔍 Search rules...">
                             </div>
                             <div id="authorityList" class="materials-list"></div>
@@ -432,8 +433,8 @@
             <div id="reviewPanel" class="panel">
                 <div class="panel-header">
                     <div class="header-left">
-                        <h2>Review & Improve</h2>
-                        <span class="header-hint">Review flagged questions and convert them into training data</span>
+                        <h2>Audit & Review Panel</h2>
+                        <span class="header-hint">Review flagged interactions and convert them into governance training data</span>
                     </div>
                     <div class="filter-pills">
                         <button class="pill active" data-filter="all">All</button>
@@ -445,7 +446,7 @@
                 <div id="flagsList" class="flags-list">
                     <div class="empty-state">
                         <div class="empty-icon">🚩</div>
-                        <div class="empty-title">Loading flagged questions...</div>
+                        <div class="empty-title">Loading flagged interactions for audit...</div>
                     </div>
                 </div>
             </div>

@@ -1,9 +1,8 @@
 import os
 import json
 import time
-import requests
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_postgres import PGVector
@@ -11,9 +10,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 import psycopg2
 import openai
+import requests
 from psycopg2.extras import RealDictCursor
-import io
-import tempfile
+from langchain_anthropic import ChatAnthropic
+import anthropic
 
 load_dotenv()
 
@@ -28,13 +28,22 @@ DB_PASS = os.getenv("DB_PASSWORD", "postgres")
 CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "")
-CARTESIA_VERSION = "2026-03-01"
 
-llm = ChatOpenAI(
+llm_openai = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0.3,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
+
+llm_anthropic = ChatAnthropic(
+    model="claude-sonnet-5",
+    temperature=None,
+    max_tokens=4096,
+    anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+)
+
+# Use one, fallback to the other
+llm = llm_anthropic if os.getenv("ANTHROPIC_API_KEY") else llm_openai
 
 embeddings = OpenAIEmbeddings(
     model="text-embedding-3-small",
@@ -168,15 +177,15 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM bot_config WHERE key = 'system_prompt'")
     if cur.fetchone()[0] == 0:
         defaults = [
-            ('system_prompt', 'You are a real estate investment AI assistant specializing in distressed property acquisition, pricing, negotiation, risk evaluation, and strategy.'),
-            ('personality', 'analytical, direct, data-driven, empathetic with emotional sellers'),
-            ('allowed_topics', 'real estate investing, distressed properties, pricing, valuation, negotiation, risk assessment, legal issues, strategy, market analysis'),
-            ('denied_topics', 'hate speech, violence, illegal activities, personal medical advice, non-real-estate investment schemes'),
-            ('response_rules', 'Always show reasoning. Cite specific numbers. If uncertain, say so. Never give legal advice without disclaiming. Respect authority rules. Ask clarifying questions when information is missing.'),
+            ('system_prompt', 'You are DTOS — a Regulated Autonomous Operator and Digital Twin advisory assistant. Your role is to participate in meetings, provide evidence-grounded reasoning, and operate strictly within defined governance boundaries. You represent the founder in advisory contexts with full transparency, auditability, and human-in-the-loop safety. You must never sign contracts, make financial commitments, or exceed your advisory authority.'),
+            ('personality', 'analytical, authoritative yet approachable, evidence-grounded, transparent, and compliant with governance protocols'),
+            ('allowed_topics', 'meeting participation, governance controls, authority hierarchy, evidence-grounded reasoning, persona management, knowledge retrieval, advisory assistance, audit trails, compliance, human override protocols, voice and avatar interaction'),
+            ('denied_topics', 'hate speech, violence, illegal activities, personal medical advice, financial commitments, contract signing, unsupervised autonomous actions, exceeding advisory authority, ungrounded speculation'),
+            ('response_rules', 'Always show reasoning and cite evidence sources. If uncertain, explicitly state so and flag for review. Never give legal advice without disclaiming. Respect authority hierarchy and the Never List. Ask clarifying questions when information is missing. Every statement must be traceable to a knowledge source.'),
             ('max_history', '10'),
             ('temperature', '0.3'),
-            ('company_name', 'DTOS Capital'),
-            ('margin_threshold', '25'),
+            ('company_name', 'DTOS'),
+            ('margin_threshold', '85'),
             ('auto_flag_conditional', 'true'),
             ('auto_flag_uncertain', 'true'),
             ('cartesia_voice_id', 'a5136bf9-224c-4d76-b823-52bd5efcffcc'),
@@ -416,92 +425,36 @@ def dismiss_flagged_question(flag_id):
     cur.close()
     conn.close()
 
-# ========== CARTESIA TTS ==========
-def cartesia_tts(text, voice_id=None, model_id=None, speed=None):
-    """Generate speech using Cartesia TTS Bytes API. Returns MP3 bytes."""
-    if not CARTESIA_API_KEY:
-        raise Exception("CARTESIA_API_KEY not configured")
-    
-    config = get_config()
-    voice_id = voice_id or config.get('cartesia_voice_id', 'a5136bf9-224c-4d76-b823-52bd5efcffcc')
-    model_id = model_id or config.get('cartesia_model', 'sonic-3.5')
-    speed = float(speed or config.get('cartesia_speed', '1.0'))
-    
-    payload = {
-        "model_id": model_id,
-        "transcript": text,
-        "voice": {
-            "mode": "id",
-            "id": voice_id
-        },
-        "output_format": {
-            "container": "mp3",
-            "sample_rate": 24000,
-            "bit_rate": 128000
-        },
-        "language": "en",
-        "generation_config": {
-            "speed": speed,
-            "volume": 1.0
-        }
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {CARTESIA_API_KEY}",
-        "Cartesia-Version": CARTESIA_VERSION,
-        "Content-Type": "application/json"
-    }
-    
-    resp = requests.post("https://api.cartesia.ai/tts/bytes", json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    return resp.content
-
-# ========== CARTESIA STT ==========
-def cartesia_stt(audio_bytes, filename="audio.wav"):
-    """Transcribe audio using Cartesia Batch STT API."""
-    if not CARTESIA_API_KEY:
-        raise Exception("CARTESIA_API_KEY not configured")
-    
-    headers = {
-        "Authorization": f"Bearer {CARTESIA_API_KEY}",
-        "Cartesia-Version": CARTESIA_VERSION
-    }
-    
-    # Cartesia STT accepts various formats: flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm
-    files = {
-        "file": (filename, io.BytesIO(audio_bytes), "audio/wav")
-    }
-    data = {
-        "model": "ink-whisper",
-        "language": "en",
-        "timestamp_granularities[]": "word"
-    }
-    
-    resp = requests.post("https://api.cartesia.ai/stt", headers=headers, files=files, data=data, timeout=60)
-    resp.raise_for_status()
-    result = resp.json()
-    
-    # Extract text from response
-    if isinstance(result, dict) and "text" in result:
-        return result["text"]
-    elif isinstance(result, list) and len(result) > 0:
-        return result[0].get("text", "")
-    elif isinstance(result, dict) and "transcript" in result:
-        return result["transcript"]
-    else:
-        return str(result)
-
 # ========== CHAT ENGINE ==========
 def save_message(session_id, role, content):
+    """
+    Save a message to the conversations table.
+    Ensures content is always a string to prevent psycopg2 'can't adapt type dict' errors.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO conversations (session_id, role, content) VALUES (%s, %s, %s)",
-        (session_id, role, content)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    
+    # Force content to string to prevent type errors
+    if content is None:
+        content = ""
+    elif not isinstance(content, str):
+        try:
+            content = str(content)
+        except Exception:
+            content = "[Unable to serialize response]"
+
+    try:
+        cur.execute(
+            "INSERT INTO conversations (session_id, role, content) VALUES (%s, %s, %s)",
+            (session_id, role, content)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"ERROR saving message to DB: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
 
 def get_history(session_id, limit=20):
     conn = get_db_connection()
@@ -521,16 +474,16 @@ def detect_situation(user_message):
     msg_lower = user_message.lower()
     situations = []
     keywords = {
+        'high_stakes_meeting': ['board', 'investor', 'partner', 'stakeholder', 'critical', 'urgent', 'deadline', 'ceo', 'founder'],
+        'governance_risk': ['contract', 'sign', 'commit', 'obligation', 'financial', 'liability', 'guarantee', 'binding'],
+        'authority_boundary': ['authority', 'permission', 'approve', 'authorize', 'override', 'escalate', 'forbidden', 'never list'],
         'emotional_seller': ['emotional', 'crying', 'died', 'memories', 'stress', 'urgent', 'fast', 'widow', 'divorce', 'sad'],
-        'bank_deal': ['bank', 'reo', 'asset manager', 'foreclosure', 'auction', 'short sale', 'lender'],
-        'wholesaler': ['wholesaler', 'assignment', 'assignment fee', 'virtual', 'double close'],
-        'hostile': ['hostile', 'angry', 'refuse', 'won\'t', 'threaten', 'lawsuit', 'sue'],
-        'contractor_issue': ['contractor', 'rehab', 'repair', 'damage', 'foundation', 'mold', 'asbestos', 'leak'],
+        'hostile': ['hostile', 'angry', 'refuse', "won't", 'threaten', 'lawsuit', 'sue'],
         'legal': ['legal', 'lawsuit', 'court', 'attorney', 'lien', 'bankruptcy', 'probate', 'title'],
-        'city_inspector': ['city', 'inspector', 'code', 'permit', 'condemnation', 'zoning', 'violation'],
-        'sophisticated_seller': ['investor', 'sophisticated', 'knows', 'margin', 'experienced', 'flipper'],
-        'tenant_issue': ['tenant', 'rent', 'lease', 'eviction', 'occupant', 'squatter'],
-        'environmental': ['mold', 'asbestos', 'lead', 'radon', 'contamination', 'flood', 'earthquake']
+        'technical_issue': ['bug', 'error', 'crash', 'latency', 'sync', 'avatar', 'voice', 'disconnect', 'failure'],
+        'compliance_audit': ['audit', 'compliance', 'regulation', 'policy', 'trace', 'log', 'evidence', 'grounded'],
+        'persona_switch': ['persona', 'mode', 'style', 'tone', 'formal', 'casual', 'friendly', 'strict'],
+        'human_override': ['override', 'takeover', 'big red button', 'stop', 'silence', 'manual', 'human-in-the-loop']
     }
     for situation, words in keywords.items():
         if any(w in msg_lower for w in words):
@@ -576,8 +529,8 @@ def get_relevant_behaviors(situations):
     return matched[:2]
 
 def build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors):
-    system = f"""You are {config.get('company_name', 'DTOS Capital')}'s AI Investment Analyst.
-Your job is to evaluate real estate deals, advise on pricing, negotiation, risk, and strategy.
+    system = f"""You are {config.get('company_name', 'DTOS')}'s Digital Twin Operating System.
+Your job is to participate in meetings as a regulated autonomous operator, provide evidence-grounded advisory responses, and enforce governance boundaries.
 You must follow ALL authority rules. You must apply appropriate behavior styles.
 You must show your reasoning with specific numbers.
 If you lack critical information, ask clarifying questions instead of guessing.
@@ -592,7 +545,7 @@ If you lack critical information, ask clarifying questions instead of guessing.
     rules = config.get('response_rules', 'Show reasoning. Cite numbers.')
     system += f"\n\nRESPONSE RULES: {rules}"
     margin = config.get('margin_threshold', '25')
-    system += f"\nMINIMUM MARGIN THRESHOLD: {margin}%"
+    system += f"\nMINIMUM CONFIDENCE THRESHOLD: {margin}%"
 
     if violations:
         system += "\n\n=== AUTHORITY CHECK ==="
@@ -626,10 +579,10 @@ CURRENT USER QUESTION: {user_message}
 
 INSTRUCTIONS:
 1. Check if this violates any authority rules. If yes, REFUSE and explain fallback.
-2. Detect the situation type and apply matching behavior style (tone, do/don't).
+2. Detect the situation type and apply matching persona behavior style (tone, do/don't).
 3. Use relevant decision patterns as precedent.
-4. Show step-by-step reasoning with numbers.
-5. State your final recommendation clearly (BUY / REJECT / NEGOTIATE / DELAY / ESCALATE / NEED MORE INFO).
+4. Show step-by-step reasoning with evidence sources and confidence levels.
+5. State your final recommendation clearly (PROCEED / REJECT / ESCALATE / DELAY / NEGOTIATE / NEED MORE INFO).
 6. If you need more information to answer accurately, ask specific questions. Do not guess.
 
 Your Response:"""
@@ -797,58 +750,6 @@ def dismiss_flag_api(flag_id):
     dismiss_flagged_question(flag_id)
     return jsonify({"status": "dismissed", "pending_count": get_pending_count()})
 
-# --- VOICE: TTS ---
-@app.route("/api/tts", methods=["POST"])
-def tts_api():
-    data = request.get_json()
-    text = data.get("text", "").strip()
-    if not text:
-        return jsonify({"error": "Text is required"}), 400
-    if not CARTESIA_API_KEY:
-        return jsonify({"error": "CARTESIA_API_KEY not configured"}), 500
-    
-    try:
-        audio_bytes = cartesia_tts(
-            text,
-            voice_id=data.get("voice_id"),
-            model_id=data.get("model_id"),
-            speed=data.get("speed")
-        )
-        return send_file(
-            io.BytesIO(audio_bytes),
-            mimetype="audio/mpeg",
-            as_attachment=False,
-            download_name="speech.mp3"
-        )
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"Cartesia TTS error: {e.response.text}"}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- VOICE: STT ---
-@app.route("/api/stt", methods=["POST"])
-def stt_api():
-    if 'audio' not in request.files:
-        return jsonify({"error": "Audio file is required"}), 400
-    if not CARTESIA_API_KEY:
-        return jsonify({"error": "CARTESIA_API_KEY not configured"}), 500
-    
-    audio_file = request.files['audio']
-    audio_bytes = audio_file.read()
-    
-    if len(audio_bytes) == 0:
-        return jsonify({"error": "Empty audio file"}), 400
-    
-    try:
-        # Cartesia accepts various formats, browser typically records webm or wav
-        filename = audio_file.filename or "audio.webm"
-        transcript = cartesia_stt(audio_bytes, filename)
-        return jsonify({"transcript": transcript})
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"Cartesia STT error: {e.response.text}"}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 # --- CHAT ---
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -877,20 +778,49 @@ def chat():
     history = get_history(session_id, limit=int(config.get('max_history', 10)))
     full_prompt = build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors)
 
-    try:
-        response = llm.invoke(full_prompt)
-        reply = response.content
-    except openai.RateLimitError as e:
-        error_code = getattr(e, 'code', None) or (e.body.get('code') if hasattr(e, 'body') else None)
-        if error_code == 'insufficient_quota' or 'quota' in str(e).lower():
-            reply = "I'm currently out of API credit. Please contact the administrator to check the OpenAI billing plan."
-        else:
-            reply = "I'm receiving too many requests right now. Please wait a moment and try again."
-    except openai.APIError as e:
-        reply = "There was a problem connecting to the AI service. Please try again later."
-    except Exception as e:
-        reply = "Something went wrong while generating a response. Please try again later."
+    reply = ""
+    model_used = "unknown"
 
+    try:
+        if os.getenv("ANTHROPIC_API_KEY"):
+            try:
+                response = llm_anthropic.invoke(full_prompt)
+                reply = getattr(response, 'content', None)
+                model_used = "claude-3-5-sonnet"
+            except Exception as e:
+                print(f"Anthropic error: {type(e).__name__}: {e}")
+                response = llm_openai.invoke(full_prompt)
+                reply = getattr(response, 'content', None)
+                model_used = "gpt-4o-mini (fallback)"
+        else:
+            response = llm_openai.invoke(full_prompt)
+            reply = getattr(response, 'content', None)
+            model_used = "gpt-4o-mini"
+
+    except Exception as e:
+        error_msg = f"LLM invocation failed: {type(e).__name__}: {str(e)}"
+        print(error_msg)
+        reply = error_msg
+        model_used = "error"
+
+    # === EXTRACT TEXT FROM ANTHROPIC CONTENT BLOCKS ===
+    if isinstance(reply, list):
+        text_parts = []
+        for block in reply:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        reply = "\n".join(text_parts).strip()
+    elif reply is None:
+        reply = ""
+    elif not isinstance(reply, str):
+        try:
+            reply = str(reply)
+        except Exception:
+            reply = "[Error: Could not convert LLM response to string]"
+
+    # Save both user and assistant messages
     save_message(session_id, "assistant", reply)
 
     suggest_flag = False
@@ -906,7 +836,7 @@ def chat():
     return jsonify({
         "reply": reply,
         "session_id": session_id,
-        "model": "gpt-4o-mini",
+        "model": model_used,
         "situations_detected": situations,
         "authority_violations": len(violations),
         "authority_details": violations,
@@ -957,6 +887,76 @@ def stats():
     cur.close()
     conn.close()
     return jsonify(stats)
+
+
+# --- VOICE / TTS / STT (Cartesia Only) ---
+@app.route("/api/stt", methods=["POST"])
+def stt():
+    if 'audio' not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+    audio_file = request.files['audio']
+    if not CARTESIA_API_KEY:
+        return jsonify({"error": "Cartesia API key not configured"}), 500
+    try:
+        resp = requests.post(
+            "https://api.cartesia.ai/transcribe",
+            headers={"Authorization": f"Bearer {CARTESIA_API_KEY}"},
+            files={"audio": (audio_file.filename, audio_file.stream, audio_file.content_type or "audio/webm")},
+            data={"language": "en"},
+            timeout=30
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": f"Cartesia STT error: {resp.status_code} - {resp.text}"}), 500
+        data = resp.json()
+        return jsonify({"transcript": data.get("text", "")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/tts", methods=["POST"])
+def tts():
+    data = request.get_json()
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "Text is required"}), 400
+
+    config = get_config()
+    voice_id = config.get("cartesia_voice_id", "a5136bf9-224c-4d76-b823-52bd5efcffcc")
+    model_id = config.get("cartesia_model", "sonic-3.5")
+    speed = float(config.get("cartesia_speed", "1.0"))
+
+    if not CARTESIA_API_KEY:
+        return jsonify({"error": "Cartesia API key not configured"}), 500
+
+    try:
+        resp = requests.post(
+            "https://api.cartesia.ai/tts/bytes",
+            headers={
+                "Authorization": f"Bearer {CARTESIA_API_KEY}",
+                "Content-Type": "application/json",
+                "Cartesia-Version": "2024-06-05"
+            },
+            json={
+                "model_id": model_id,
+                "transcript": text,
+                "voice": {
+                    "mode": "id",
+                    "id": voice_id
+                },
+                "output_format": {
+                    "container": "mp3",
+                    "sample_rate": 24000,
+                    "encoding": "mp3"
+                },
+                "language": "en",
+                "speed": speed
+            },
+            timeout=30
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": f"Cartesia TTS error: {resp.status_code} - {resp.text}"}), 500
+        return resp.content, 200, {"Content-Type": "audio/mpeg"}
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     init_db()

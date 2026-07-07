@@ -1,4 +1,4 @@
-// === STATE ===
+// === DTOS Digital Twin Operating System — Frontend Controller ===
 const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
 let currentTab = 'chat';
 let currentSubTab = 'decisions';
@@ -208,7 +208,7 @@ async function saveConfig() {
     try {
         await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
         saveConfigBtn.innerHTML = '✅ Saved!';
-        showToast('Configuration saved successfully');
+        showToast('Governance configuration saved successfully');
         setTimeout(() => { saveConfigBtn.innerHTML = '💾 Save Configuration'; saveConfigBtn.disabled = false; }, 1500);
     } catch (e) {
         saveConfigBtn.innerHTML = '❌ Error';
@@ -269,7 +269,7 @@ async function startRecording() {
         
         voiceBtn.classList.add('recording');
         voiceWave.classList.remove('hidden');
-        voiceLabel.textContent = 'Recording...';
+        voiceLabel.textContent = 'Recording voice input...';
         
         recordingTimer = setInterval(() => {
             const secs = Math.floor((Date.now() - recordingStartTime) / 1000);
@@ -294,7 +294,7 @@ function stopRecording() {
     
     voiceBtn.classList.remove('recording');
     voiceWave.classList.add('hidden');
-    voiceLabel.textContent = 'Hold to speak';
+    voiceLabel.textContent = 'Hold to speak to DTOS';
     voiceStatus.textContent = '';
 }
 
@@ -305,7 +305,7 @@ async function processVoiceRecording() {
     const ext = mimeType.includes('webm') ? 'webm' : (mimeType.includes('mp4') ? 'm4a' : 'ogg');
     const audioBlob = new Blob(audioChunks, { type: mimeType });
     
-    voiceLabel.textContent = 'Transcribing...';
+    voiceLabel.textContent = 'Transcribing voice input...';
     voiceStatus.textContent = '';
     
     const formData = new FormData();
@@ -317,28 +317,28 @@ async function processVoiceRecording() {
         
         if (data.error) {
             showToast(`STT Error: ${data.error}`, 'error');
-            voiceLabel.textContent = 'Hold to speak';
+            voiceLabel.textContent = 'Hold to speak to DTOS';
             return;
         }
         
         const transcript = data.transcript?.trim();
         if (!transcript) {
             showToast('No speech detected. Try again.', 'error');
-            voiceLabel.textContent = 'Hold to speak';
+            voiceLabel.textContent = 'Hold to speak to DTOS';
             return;
         }
         
         userInput.value = transcript;
         userInput.style.height = 'auto';
         userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
-        voiceLabel.textContent = 'Hold to speak';
+        voiceLabel.textContent = 'Hold to speak to DTOS';
         
         setTimeout(() => sendMessage(), 300);
         
     } catch (e) {
         console.error('STT error:', e);
         showToast('Transcription failed. Try again.', 'error');
-        voiceLabel.textContent = 'Hold to speak';
+        voiceLabel.textContent = 'Hold to speak to DTOS';
     }
 }
 
@@ -416,7 +416,7 @@ function filterDecisions() {
 
 function renderDecisions(decisions) {
     if (!decisions || decisions.length === 0) {
-        decisionsList.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><div class="empty-title">No decisions yet</div><div class="empty-desc">Add your first decision pattern to train the AI</div></div>';
+        decisionsList.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><div class="empty-title">No decision patterns yet</div><div class="empty-desc">Add your first governance decision pattern to train the Digital Twin</div></div>';
         return;
     }
     decisionsList.innerHTML = decisions.map(d => {
@@ -470,13 +470,13 @@ async function addDecision() {
         await fetch('/api/decisions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         decQuestion.value = ''; decContext.value = ''; decAnswer.value = ''; decReasoning.value = '';
         loadDecisions(decFilter.value); loadStats();
-        showToast('Decision pattern added');
-        addDecBtn.innerHTML = '➕ Add Decision'; addDecBtn.disabled = false;
+        showToast('Governance decision pattern added');
+        addDecBtn.innerHTML = '➕ Add Decision Pattern'; addDecBtn.disabled = false;
     } catch (e) { addDecBtn.innerHTML = '❌ Error'; addDecBtn.disabled = false; }
 }
 
 async function toggleDecision(id) { await fetch(`/api/decisions/${id}/toggle`, { method: 'POST' }); loadDecisions(decFilter.value); }
-async function deleteDecision(id) { if (!confirm('Delete this decision?')) return; await fetch(`/api/decisions/${id}`, { method: 'DELETE' }); loadDecisions(decFilter.value); loadStats(); }
+async function deleteDecision(id) { if (!confirm('Delete this governance decision pattern?')) return; await fetch(`/api/decisions/${id}`, { method: 'DELETE' }); loadDecisions(decFilter.value); loadStats(); }
 
 // === BEHAVIORS ===
 async function loadBehaviors() {
@@ -503,8 +503,8 @@ function renderBehaviors(behaviors) {
         behaviorsList.innerHTML = `
             <div class="empty-state">
                 <div class="empty-icon">🎭</div>
-                <div class="empty-title">No behaviors yet</div>
-                <div class="empty-desc">Add behavior styles to guide the AI's tone and approach</div>
+                <div class="empty-title">No persona behaviors yet</div>
+                <div class="empty-desc">Add persona behavior styles to guide the Digital Twin's tone and approach</div>
             </div>
         `;
         return;
@@ -563,13 +563,13 @@ async function addBehavior() {
         await fetch('/api/behaviors', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         behSituation.value = ''; behTone.value = ''; behExample.value = ''; behDo.value = ''; behDont.value = '';
         loadBehaviors(); loadStats();
-        showToast('Behavior style added');
-        addBehBtn.innerHTML = '➕ Add Behavior'; addBehBtn.disabled = false;
+        showToast('Persona behavior style added');
+        addBehBtn.innerHTML = '➕ Add Persona Behavior'; addBehBtn.disabled = false;
     } catch (e) { addBehBtn.innerHTML = '❌ Error'; addBehBtn.disabled = false; }
 }
 
 async function toggleBehavior(id) { await fetch(`/api/behaviors/${id}/toggle`, { method: 'POST' }); loadBehaviors(); }
-async function deleteBehavior(id) { if (!confirm('Delete this behavior?')) return; await fetch(`/api/behaviors/${id}`, { method: 'DELETE' }); loadBehaviors(); loadStats(); }
+async function deleteBehavior(id) { if (!confirm('Delete this persona behavior?')) return; await fetch(`/api/behaviors/${id}`, { method: 'DELETE' }); loadBehaviors(); loadStats(); }
 
 // === AUTHORITY ===
 async function loadAuthority() {
@@ -593,7 +593,7 @@ function filterAuthority() {
 
 function renderAuthority(rules) {
     if (!rules || rules.length === 0) {
-        authorityList.innerHTML = '<div class="empty-state"><div class="empty-icon">🛡️</div><div class="empty-title">No authority rules yet</div><div class="empty-desc">Add rules to control what the AI can and cannot do</div></div>';
+        authorityList.innerHTML = '<div class="empty-state"><div class="empty-icon">🛡️</div><div class="empty-title">No authority rules yet</div><div class="empty-desc">Add authority and safety rules to control what the Digital Twin can and cannot do</div></div>';
         return;
     }
     authorityList.innerHTML = rules.map(r => {
@@ -636,13 +636,13 @@ async function addAuthority() {
         await fetch('/api/authority', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         authAction.value = ''; authCondition.value = ''; authFallback.value = '';
         loadAuthority(); loadStats();
-        showToast('Authority rule added');
-        addAuthBtn.innerHTML = '➕ Add Authority'; addAuthBtn.disabled = false;
+        showToast('Authority and safety rule added');
+        addAuthBtn.innerHTML = '➕ Add Authority & Safety Rule'; addAuthBtn.disabled = false;
     } catch (e) { addAuthBtn.innerHTML = '❌ Error'; addAuthBtn.disabled = false; }
 }
 
 async function toggleAuthority(id) { await fetch(`/api/authority/${id}/toggle`, { method: 'POST' }); loadAuthority(); }
-async function deleteAuthority(id) { if (!confirm('Delete this rule?')) return; await fetch(`/api/authority/${id}`, { method: 'DELETE' }); loadAuthority(); loadStats(); }
+async function deleteAuthority(id) { if (!confirm('Delete this authority and safety rule?')) return; await fetch(`/api/authority/${id}`, { method: 'DELETE' }); loadAuthority(); loadStats(); }
 
 // === REVIEW / FLAGS ===
 async function loadFlags() {
@@ -654,7 +654,7 @@ async function loadFlags() {
         updateBadge(data.pending_count || 0);
 
         if (!data.flags || data.flags.length === 0) {
-            flagsList.innerHTML = '<div class="empty-state"><div class="empty-icon">🚩</div><div class="empty-title">No flagged questions</div><div class="empty-desc">Questions flagged for review will appear here</div></div>';
+            flagsList.innerHTML = '<div class="empty-state"><div class="empty-icon">🚩</div><div class="empty-title">No flagged interactions</div><div class="empty-desc">Interactions flagged for audit review will appear here</div></div>';
             return;
         }
 
@@ -815,20 +815,20 @@ async function resolveFlag(flagId) {
         await fetch(`/api/flags/${flagId}/resolve`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
         });
-        loadFlags(); loadStats(); showToast('Flag resolved and answer saved');
+        loadFlags(); loadStats(); showToast('Audit flag resolved and governance answer saved');
     } catch (e) { showToast('Failed to resolve', 'error'); }
 }
 
 async function dismissFlag(flagId) {
-    if (!confirm('Dismiss this flag?')) return;
+    if (!confirm('Dismiss this audit flag?')) return;
     try {
         await fetch(`/api/flags/${flagId}/dismiss`, { method: 'POST' });
         loadFlags(); loadStats();
-    } catch (e) { showToast('Failed to dismiss', 'error'); }
+    } catch (e) { showToast('Failed to dismiss audit flag', 'error'); }
 }
 
 async function manualFlag() {
-    if (!lastQuestion) { showToast('No question to flag', 'error'); return; }
+    if (!lastQuestion) { showToast('No interaction to flag for audit', 'error'); return; }
     try {
         await fetch('/api/flags', {
             method: 'POST',
@@ -838,9 +838,9 @@ async function manualFlag() {
                 ai_response: lastAiResponse, context: lastContext, flag_reason: 'manual'
             })
         });
-        showToast('🚩 Flagged for review');
+        showToast('🚩 Flagged for audit review');
         loadStats();
-    } catch (e) { showToast('Failed to flag', 'error'); }
+    } catch (e) { showToast('Failed to flag for audit', 'error'); }
 }
 
 // === CHAT ===
@@ -854,7 +854,7 @@ function appendMessage(role, text, analysis = null) {
 
         if (analysis.situations_detected?.length > 0) {
             const s = document.createElement('span'); s.className = 'analysis-badge ab-info';
-            s.textContent = `📍 ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
+            s.textContent = `📍 Situations: ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
         }
         if (analysis.has_forbidden) {
             const a = document.createElement('span'); a.className = 'analysis-badge ab-danger';
@@ -868,18 +868,18 @@ function appendMessage(role, text, analysis = null) {
         }
         if (analysis.decisions_retrieved > 0) {
             const d = document.createElement('span'); d.className = 'analysis-badge ab-ok';
-            d.textContent = `📚 ${analysis.decisions_retrieved} patterns`; bar.appendChild(d);
+            d.textContent = `📚 ${analysis.decisions_retrieved} decision patterns`; bar.appendChild(d);
         }
         if (analysis.behaviors_applied > 0) {
             const b = document.createElement('span'); b.className = 'analysis-badge ab-ok';
-            b.textContent = `🎭 ${analysis.behaviors_applied} styles`; bar.appendChild(b);
+            b.textContent = `🎭 ${analysis.behaviors_applied} persona styles`; bar.appendChild(b);
         }
         div.appendChild(bar);
 
         if (analysis.suggest_flag) {
             const banner = document.createElement('div');
             banner.className = 'flag-banner';
-            banner.innerHTML = `<span>⚠️ This answer may need review. AI confidence is low or authority is conditional.</span><button onclick="manualFlag()">Flag for Review</button>`;
+            banner.innerHTML = `<span>⚠️ This response may need audit review. Confidence is low or authority is conditional.</span><button onclick="manualFlag()">Flag for Audit</button>`;
             div.appendChild(banner);
         }
     }
@@ -892,7 +892,7 @@ function appendMessage(role, text, analysis = null) {
         // TTS button
         const ttsBtn = document.createElement('button');
         ttsBtn.className = 'tts-btn';
-        ttsBtn.title = 'Read aloud';
+        ttsBtn.title = 'Read aloud via voice engine';
         ttsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
         ttsBtn.onclick = () => playTTS(text, ttsBtn);
         bubble.appendChild(ttsBtn);
@@ -900,7 +900,7 @@ function appendMessage(role, text, analysis = null) {
         const copyBtn = document.createElement('button');
         copyBtn.className = 'copy-btn';
         copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-        copyBtn.title = 'Copy response';
+        copyBtn.title = 'Copy response to clipboard';
         copyBtn.onclick = () => { navigator.clipboard.writeText(text); showToast('Copied to clipboard'); };
         bubble.appendChild(copyBtn);
     } else {
@@ -959,7 +959,7 @@ async function sendMessage() {
         }
     } catch (e) {
         hideTyping();
-        appendMessage('assistant', 'Network error. Please try again.');
+        appendMessage('assistant', 'Network error. Connection to the reasoning engine lost. Please try again. Incident logged.');
     } finally {
         sendBtn.disabled = false;
         userInput.focus();
@@ -987,12 +987,12 @@ async function clearChat() {
     chatBox.innerHTML = `
         <div class="message assistant welcome">
             <div class="bubble">
-                <div class="bubble-title">Welcome to DTOS AI</div>
-                <p>I'm your investment analyst. Describe any deal, negotiation, or situation and I'll analyze it using your configured policies and knowledge base.</p>
+                <div class="bubble-title">Welcome to DTOS</div>
+                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
                 <div class="quick-pills">
-                    <button class="quick-pill" onclick="quickAsk('I have a distressed property with $200k debt. Should I buy?')">Distressed + debt</button>
-                    <button class="quick-pill" onclick="quickAsk('The seller is emotional and wants to close fast. How do I negotiate?')">Emotional seller</button>
-                    <button class="quick-pill" onclick="quickAsk('A bank REO is listed at 80% of ARV. What is my max offer?')">Bank REO pricing</button>
+                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
+                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
+                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
                 </div>
             </div>
         </div>
