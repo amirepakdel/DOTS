@@ -3,27 +3,453 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Agent Dashboard</title>
+    <title>DTOS AI — Investment Analyst</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<base target="_blank">
 </head>
 <body>
     <div class="app">
-        <header>
-            <h1>🤖 AI Agent</h1>
-            <span class="badge">gpt-4o-mini</span>
-            <button id="clearBtn" class="btn-secondary">Clear Chat</button>
-        </header>
-
-        <div id="chatBox" class="chat-box">
-            <div class="message assistant">
-                <div class="bubble">Hello! I'm your AI assistant. Ask me anything.</div>
+        <!-- Sidebar Navigation -->
+        <nav class="sidebar">
+            <div class="nav-brand">
+                <div class="logo">🏢</div>
+                <div class="brand-text">
+                    <div class="brand-name">DTOS AI</div>
+                    <div class="brand-sub">Investment Analyst</div>
+                </div>
             </div>
-        </div>
 
-        <div class="input-area">
-            <textarea id="userInput" placeholder="Type your message..." rows="1"></textarea>
-            <button id="sendBtn" class="btn-primary">Send</button>
-        </div>
+            <div class="nav-items">
+                <button class="nav-item active" data-tab="chat">
+                    <span class="nav-icon">💬</span>
+                    <span class="nav-label">Chat</span>
+                </button>
+                <button class="nav-item" data-tab="settings">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-label">Settings</span>
+                </button>
+                <button class="nav-item" data-tab="teach">
+                    <span class="nav-icon">🎓</span>
+                    <span class="nav-label">Teaching</span>
+                </button>
+                <button class="nav-item" data-tab="review">
+                    <span class="nav-icon">🚩</span>
+                    <span class="nav-label">Review</span>
+                    <span class="nav-badge" id="reviewBadge">0</span>
+                </button>
+            </div>
+
+            <div class="nav-footer">
+                <div class="status-dot"></div>
+                <span class="status-text">gpt-4o-mini</span>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- CHAT PANEL -->
+            <div id="chatPanel" class="panel active">
+                <div class="panel-header">
+                    <div class="header-left">
+                        <h2>Operations Center</h2>
+                        <span class="header-hint">Describe any deal, negotiation, or situation</span>
+                    </div>
+                    <div class="header-actions">
+                        <button id="clearBtn" class="btn-ghost" title="Clear conversation (Ctrl+L)">
+                            <span>🗑️</span> Clear
+                        </button>
+                    </div>
+                </div>
+                <div class="chat-container">
+                    <div id="chatBox" class="chat-box">
+                        <div class="message assistant welcome">
+                            <div class="bubble">
+                                <div class="bubble-title">Welcome to DTOS AI</div>
+                                <p>I'm your investment analyst. Describe any deal, negotiation, or situation and I'll analyze it using your configured policies and knowledge base.</p>
+                                <div class="quick-pills">
+                                    <button class="quick-pill" onclick="quickAsk('I have a distressed property with $200k debt. Should I buy?')">Distressed + debt</button>
+                                    <button class="quick-pill" onclick="quickAsk('The seller is emotional and wants to close fast. How do I negotiate?')">Emotional seller</button>
+                                    <button class="quick-pill" onclick="quickAsk('A bank REO is listed at 80% of ARV. What is my max offer?')">Bank REO pricing</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <div class="input-toolbar">
+                            <label class="toggle-sm">
+                                <input type="checkbox" id="useKb" checked>
+                                <span class="toggle-track"></span>
+                                <span>Knowledge Base</span>
+                            </label>
+                            <button id="flagBtn" class="btn-ghost-sm" title="Flag last question for admin review">🚩 Flag</button>
+                        </div>
+                        <div class="input-row">
+                            <textarea id="userInput" placeholder="Describe your deal situation..." rows="1"></textarea>
+                            <button id="sendBtn" class="btn-primary" title="Send (Enter)">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                            </button>
+                        </div>
+                        <div class="input-hint">Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+L</kbd> to clear</div>
+                        
+                        <!-- Voice Input Bar -->
+                        <div class="voice-bar">
+                            <button id="voiceBtn" class="voice-btn" title="Hold to record voice message">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                                <span id="voiceLabel">Hold to speak</span>
+                            </button>
+                            <div id="voiceWave" class="voice-wave hidden">
+                                <span></span><span></span><span></span><span></span><span></span>
+                            </div>
+                            <span id="voiceStatus" class="voice-status"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SETTINGS PANEL -->
+            <div id="settingsPanel" class="panel">
+                <div class="panel-header">
+                    <div class="header-left">
+                        <h2>Settings & Configuration</h2>
+                        <span class="header-hint">Customize how the AI behaves and responds</span>
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    <div class="settings-card">
+                        <h3>🏢 Company Identity</h3>
+                        <div class="form-group">
+                            <label>Company Name</label>
+                            <input type="text" id="cfgCompany" placeholder="DTOS Capital">
+                        </div>
+                        <div class="form-group">
+                            <label>System Prompt</label>
+                            <textarea id="cfgSystem" rows="3" placeholder="Base system prompt..."></textarea>
+                            <span class="field-hint">Defines the AI's core role and expertise</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Personality Traits</label>
+                            <input type="text" id="cfgPersonality" placeholder="analytical, direct, empathetic...">
+                        </div>
+                    </div>
+
+                    <div class="settings-card">
+                        <h3>🛡️ Policy Boundaries</h3>
+                        <div class="form-group">
+                            <label>Allowed Topics</label>
+                            <textarea id="cfgAllowed" rows="2"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Denied Topics</label>
+                            <textarea id="cfgDenied" rows="2"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Response Rules</label>
+                            <textarea id="cfgRules" rows="3"></textarea>
+                            <span class="field-hint">How the AI should format and structure answers</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-card">
+                        <h3>⚡ Financial & Model</h3>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label>Min Margin %</label>
+                                <input type="number" id="cfgMargin" value="25" min="0" max="100">
+                            </div>
+                            <div class="form-group half">
+                                <label>Max History</label>
+                                <input type="number" id="cfgHistory" value="10" min="1" max="50">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label>Temperature</label>
+                                <input type="number" id="cfgTemp" value="0.3" min="0" max="2" step="0.1">
+                                <span class="field-hint">0 = deterministic, 2 = very creative</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Auto-Flag Conditional Authority</label>
+                            <select id="cfgAutoFlagConditional">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Auto-Flag Uncertain Answers</label>
+                            <select id="cfgAutoFlagUncertain">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                        
+                        <h3 style="margin-top:24px">🔊 Voice (Cartesia)</h3>
+                        <div class="form-group">
+                            <label>Cartesia Voice ID</label>
+                            <input type="text" id="cfgVoiceId" placeholder="e07c00bc-4134-4eae-9ea4-1a55fb45746b">
+                            <span class="field-hint">Default voice for TTS playback</span>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label>Cartesia Model</label>
+                                <select id="cfgCartesiaModel">
+                                    <option value="sonic-3.5">sonic-3.5</option>
+                                    <option value="sonic-3">sonic-3</option>
+                                    <option value="sonic-latest">sonic-latest</option>
+                                </select>
+                            </div>
+                            <div class="form-group half">
+                                <label>Voice Speed</label>
+                                <input type="number" id="cfgVoiceSpeed" value="1.0" min="0.5" max="2.0" step="0.1">
+                            </div>
+                        </div>
+                        
+                        <button id="saveConfigBtn" class="btn-primary full">💾 Save Configuration</button>
+                    </div>
+
+                    <div class="settings-card stats-card">
+                        <h3>📊 System Overview</h3>
+                        <div class="stats-grid" id="statsGrid">
+                            <div class="stat-box">
+                                <div class="stat-value" id="statDecisions">-</div>
+                                <div class="stat-label">Active Decisions</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-value" id="statBehaviors">-</div>
+                                <div class="stat-label">Active Behaviors</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-value" id="statAuthority">-</div>
+                                <div class="stat-label">Authority Rules</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-value" id="statPending">-</div>
+                                <div class="stat-label">Pending Flags</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-value" id="statResolved">-</div>
+                                <div class="stat-label">Resolved Flags</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-value" id="statMessages">-</div>
+                                <div class="stat-label">Total Messages</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TEACHING PANEL -->
+            <div id="teachPanel" class="panel">
+                <div class="panel-header">
+                    <div class="header-left">
+                        <h2>Teaching Center</h2>
+                        <span class="header-hint">Train the AI with decision patterns, behaviors, and authority rules</span>
+                    </div>
+                    <div class="sub-tabs">
+                        <button class="sub-tab active" data-sub="decisions">📊 Decisions</button>
+                        <button class="sub-tab" data-sub="behaviors">🎭 Behaviors</button>
+                        <button class="sub-tab" data-sub="authority">🛡️ Authority</button>
+                    </div>
+                </div>
+
+                <!-- Decisions Sub -->
+                <div id="sub-decisions" class="sub-panel active">
+                    <div class="teach-layout">
+                        <div class="teach-form">
+                            <div class="card">
+                                <h3>➕ Add Decision Pattern</h3>
+                                <div class="form-group">
+                                    <label>Question <span class="req">*</span></label>
+                                    <textarea id="decQuestion" rows="2" placeholder="Should we buy this property with $200k debt attached?"></textarea>
+                                    <span class="field-error" id="errDecQuestion"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Context <span class="req">*</span></label>
+                                    <textarea id="decContext" rows="2" placeholder="Property is in foreclosure..."></textarea>
+                                    <span class="field-error" id="errDecContext"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Ideal Answer <span class="req">*</span></label>
+                                    <textarea id="decAnswer" rows="2" placeholder="Reject unless price drops below..."></textarea>
+                                    <span class="field-error" id="errDecAnswer"></span>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group third">
+                                        <label>Category <span class="req">*</span></label>
+                                        <select id="decCategory">
+                                            <option value="pricing">Pricing</option>
+                                            <option value="acquisition">Acquisition</option>
+                                            <option value="negotiation">Negotiation</option>
+                                            <option value="risk">Risk</option>
+                                            <option value="strategy">Strategy</option>
+                                            <option value="legal">Legal</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group third">
+                                        <label>Authority <span class="req">*</span></label>
+                                        <select id="decAuthority">
+                                            <option value="low">Low</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="high">High</option>
+                                            <option value="forbidden">Forbidden</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group third">
+                                        <label>Action <span class="req">*</span></label>
+                                        <select id="decAction">
+                                            <option value="buy">Buy</option>
+                                            <option value="reject">Reject</option>
+                                            <option value="negotiate">Negotiate</option>
+                                            <option value="escalate">Escalate</option>
+                                            <option value="delay">Delay</option>
+                                            <option value="conditional">Conditional</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Reasoning <span class="req">*</span></label>
+                                    <textarea id="decReasoning" rows="3" placeholder="Detailed financial reasoning..."></textarea>
+                                    <span class="field-error" id="errDecReasoning"></span>
+                                </div>
+                                <button id="addDecBtn" class="btn-primary full">➕ Add Decision</button>
+                            </div>
+                        </div>
+                        <div class="teach-list">
+                            <div class="list-toolbar">
+                                <h3>📚 Decision Knowledge Base</h3>
+                                <div class="toolbar-right">
+                                    <input type="text" id="decSearch" class="search-input" placeholder="🔍 Search decisions...">
+                                    <select id="decFilter" class="filter-select">
+                                        <option value="">All Categories</option>
+                                        <option value="pricing">Pricing</option>
+                                        <option value="acquisition">Acquisition</option>
+                                        <option value="negotiation">Negotiation</option>
+                                        <option value="risk">Risk</option>
+                                        <option value="strategy">Strategy</option>
+                                        <option value="legal">Legal</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="decisionsList" class="materials-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Behaviors Sub -->
+                <div id="sub-behaviors" class="sub-panel">
+                    <div class="teach-layout">
+                        <div class="teach-form">
+                            <div class="card">
+                                <h3>➕ Add Behavior Style</h3>
+                                <div class="form-group">
+                                    <label>Situation <span class="req">*</span></label>
+                                    <textarea id="behSituation" rows="2" placeholder="Seller is emotionally stressed..."></textarea>
+                                    <span class="field-error" id="errBehSituation"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Tone <span class="req">*</span></label>
+                                    <input type="text" id="behTone" placeholder="calm but firm">
+                                    <span class="field-error" id="errBehTone"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Example Response <span class="req">*</span></label>
+                                    <textarea id="behExample" rows="3" placeholder="I understand your urgency..."></textarea>
+                                    <span class="field-error" id="errBehExample"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Do Rules <span class="req">*</span></label>
+                                    <textarea id="behDo" rows="2" placeholder="stay calm, focus on numbers..."></textarea>
+                                    <span class="field-error" id="errBehDo"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Don't Rules <span class="req">*</span></label>
+                                    <textarea id="behDont" rows="2" placeholder="overpromise, rush decision..."></textarea>
+                                    <span class="field-error" id="errBehDont"></span>
+                                </div>
+                                <button id="addBehBtn" class="btn-primary full">➕ Add Behavior</button>
+                            </div>
+                        </div>
+                        <div class="teach-list">
+                            <div class="list-toolbar">
+                                <h3>🎭 Behavior Styles</h3>
+                                <input type="text" id="behSearch" class="search-input" placeholder="🔍 Search behaviors...">
+                            </div>
+                            <div id="behaviorsList" class="materials-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Authority Sub -->
+                <div id="sub-authority" class="sub-panel">
+                    <div class="teach-layout">
+                        <div class="teach-form">
+                            <div class="card">
+                                <h3>➕ Add Authority Rule</h3>
+                                <div class="form-group">
+                                    <label>Action Type <span class="req">*</span></label>
+                                    <input type="text" id="authAction" placeholder="pricing / discount approval below 25% margin">
+                                    <span class="field-error" id="errAuthAction"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Allowed <span class="req">*</span></label>
+                                    <select id="authAllowed">
+                                        <option value="yes">Yes</option>
+                                        <option value="no">No</option>
+                                        <option value="conditional">Conditional</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Condition <span class="req">*</span></label>
+                                    <textarea id="authCondition" rows="2" placeholder="only founder can approve..."></textarea>
+                                    <span class="field-error" id="errAuthCondition"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Fallback Behavior <span class="req">*</span></label>
+                                    <textarea id="authFallback" rows="2" placeholder="escalate to founder with..."></textarea>
+                                    <span class="field-error" id="errAuthFallback"></span>
+                                </div>
+                                <button id="addAuthBtn" class="btn-primary full">➕ Add Authority Rule</button>
+                            </div>
+                        </div>
+                        <div class="teach-list">
+                            <div class="list-toolbar">
+                                <h3>🛡️ Authority Rules</h3>
+                                <input type="text" id="authSearch" class="search-input" placeholder="🔍 Search rules...">
+                            </div>
+                            <div id="authorityList" class="materials-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- REVIEW PANEL -->
+            <div id="reviewPanel" class="panel">
+                <div class="panel-header">
+                    <div class="header-left">
+                        <h2>Review & Improve</h2>
+                        <span class="header-hint">Review flagged questions and convert them into training data</span>
+                    </div>
+                    <div class="filter-pills">
+                        <button class="pill active" data-filter="all">All</button>
+                        <button class="pill" data-filter="pending">Pending <span id="pillPending">0</span></button>
+                        <button class="pill" data-filter="resolved">Resolved</button>
+                        <button class="pill" data-filter="dismissed">Dismissed</button>
+                    </div>
+                </div>
+                <div id="flagsList" class="flags-list">
+                    <div class="empty-state">
+                        <div class="empty-icon">🚩</div>
+                        <div class="empty-title">Loading flagged questions...</div>
+                    </div>
+                </div>
+            </div>
+        </main>
     </div>
 
     <script src="{{ url_for('static', filename='script.js') }}"></script>
