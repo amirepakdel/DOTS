@@ -3,13 +3,12 @@ version: '3.8'
 services:
   postgres:
     image: ankane/pgvector:latest
-    container_name: chatgpt-postgres
+    container_name: dtos-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: chatdb
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -19,23 +18,50 @@ services:
       timeout: 5s
       retries: 5
 
-  flask:
+  django:
     build: .
-    container_name: chatgpt-flask
+    container_name: dtos-django
     environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-change-me-in-production}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY}
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=chatdb
       - DB_USER=postgres
       - DB_PASSWORD=postgres
-      - FLASK_ENV=development
-    ports:
-      - "5000:5000"
+      - DEBUG=${DEBUG:-False}
+      - STATIC_ROOT=/var/www/static
+    expose:
+      - "8000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
-      - ./:/app
+      - static_volume:/var/www/static
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    container_name: dtos-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CERTBOT_DOMAIN=su.forclosure.ai
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL:-}
+      - CERTBOT_STAGING=${CERTBOT_STAGING:-0}
+    volumes:
+      - static_volume:/var/www/static:ro
+      - certbot_data:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    depends_on:
+      - django
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  static_volume:
+  certbot_data:
+  certbot_www:

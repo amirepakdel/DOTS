@@ -305,6 +305,15 @@ async function processVoiceRecording() {
     const ext = mimeType.includes('webm') ? 'webm' : (mimeType.includes('mp4') ? 'm4a' : 'ogg');
     const audioBlob = new Blob(audioChunks, { type: mimeType });
     
+    // GUARD: reject empty blobs before sending
+    console.log('Recorded blob size:', audioBlob.size, 'type:', audioBlob.type);
+    if (audioBlob.size === 0) {
+        showToast('No audio captured. Hold the button longer.', 'error');
+        voiceLabel.textContent = 'Hold to speak to DTOS';
+        audioChunks = [];
+        return;
+    }
+    
     voiceLabel.textContent = 'Transcribing voice input...';
     voiceStatus.textContent = '';
     
@@ -313,7 +322,9 @@ async function processVoiceRecording() {
     
     try {
         const res = await fetch('/api/stt', { method: 'POST', body: formData });
+        console.log('STT response status:', res.status);
         const data = await res.json();
+        console.log('STT response data:', data);
         
         if (data.error) {
             showToast(`STT Error: ${data.error}`, 'error');
@@ -336,9 +347,11 @@ async function processVoiceRecording() {
         setTimeout(() => sendMessage(), 300);
         
     } catch (e) {
-        console.error('STT error:', e);
+        console.error('STT fetch error:', e);
         showToast('Transcription failed. Try again.', 'error');
         voiceLabel.textContent = 'Hold to speak to DTOS';
+    } finally {
+        audioChunks = []; // clear chunks after sending
     }
 }
 
