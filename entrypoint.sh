@@ -1,4 +1,6 @@
 #!/bin/sh
+chmod +x "$0" 2>/dev/null || true
+
 set -e
 
 echo "Waiting for PostgreSQL at $DB_HOST:$DB_PORT..."
@@ -16,5 +18,5 @@ python manage.py migrate --noinput
 echo "Running init_db..."
 python manage.py init_db
 
-echo "Starting Gunicorn..."
-exec gunicorn dtos.wsgi:application -c /app/gunicorn.conf.py
+echo "Starting Daphne (ASGI Server)..."
+exec daphne -b 0.0.0.0 -p 8000 dtos.asgi:application

@@ -1,5 +1,15 @@
 import requests
 import logging
+import json
+import uuid
+import base64
+import threading
+import tempfile
+import os
+import time
+import struct
+import io
+
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -10,16 +20,27 @@ from django.views.generic import TemplateView
 from .models import *
 from .serializers import *
 from .governance import *
-import os
-import tempfile
-
-from io import BytesIO
 from django.conf import settings
+
+try:
+    import websocket
+    WEBSOCKET_CLIENT_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_CLIENT_AVAILABLE = False
+
+# Optional: pydub for audio conversion without ffmpeg
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
+
 class IndexView(TemplateView):
     template_name = 'index.html'
+
 
 class HealthView(APIView):
     def get(self, request):
@@ -27,6 +48,7 @@ class HealthView(APIView):
             "status": "ok",
             "pending_flags": get_pending_count()
         })
+
 
 class ConfigView(APIView):
     def get(self, request):
@@ -40,16 +62,14 @@ class ConfigView(APIView):
             )
         return Response({"status": "updated", "config": get_config()})
 
+
 class DecisionViewSet(viewsets.ModelViewSet):
     queryset = Decision.objects.all()
     serializer_class = DecisionSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
-        active_only = self.request.query_params.get('active_only', 'true').lower() == 'true'
         category = self.request.query_params.get('category')
-        if active_only:
-            qs = qs.filter(active=True)
         if category:
             qs = qs.filter(category=category)
         return qs.order_by('-created_at')
@@ -75,15 +95,13 @@ class DecisionViewSet(viewsets.ModelViewSet):
         super().destroy(request, *args, **kwargs)
         return Response({"status": "deleted"})
 
+
 class BehaviorViewSet(viewsets.ModelViewSet):
     queryset = Behavior.objects.all()
     serializer_class = BehaviorSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
-        active_only = self.request.query_params.get('active_only', 'true').lower() == 'true'
-        if active_only:
-            qs = qs.filter(active=True)
         return qs.order_by('-created_at')
 
     def create(self, request, *args, **kwargs):
@@ -107,15 +125,13 @@ class BehaviorViewSet(viewsets.ModelViewSet):
         super().destroy(request, *args, **kwargs)
         return Response({"status": "deleted"})
 
+
 class AuthorityViewSet(viewsets.ModelViewSet):
     queryset = AuthorityRule.objects.all()
     serializer_class = AuthorityRuleSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
-        active_only = self.request.query_params.get('active_only', 'true').lower() == 'true'
-        if active_only:
-            qs = qs.filter(active=True)
         return qs.order_by('-created_at')
 
     def create(self, request, *args, **kwargs):
@@ -134,6 +150,7 @@ class AuthorityViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         super().destroy(request, *args, **kwargs)
         return Response({"status": "deleted"})
+
 
 class FlagViewSet(viewsets.ModelViewSet):
     queryset = FlaggedQuestion.objects.all()
@@ -236,6 +253,7 @@ class FlagViewSet(viewsets.ModelViewSet):
             "pending_count": get_pending_count()
         })
 
+
 class ChatView(APIView):
     def post(self, request):
         user_message = request.data.get("message", "").strip()
@@ -329,6 +347,7 @@ class ChatView(APIView):
             "flag_reason": flag_reason
         })
 
+
 class HistoryView(APIView):
     def get(self, request):
         session_id = request.query_params.get("session_id", "default")
@@ -336,11 +355,13 @@ class HistoryView(APIView):
         history = [{'role': c.role, 'content': c.content} for c in reversed(list(qs))]
         return Response({"history": history})
 
+
 class ClearView(APIView):
     def post(self, request):
         session_id = request.data.get("session_id", "default")
         Conversation.objects.filter(session_id=session_id).delete()
         return Response({"status": "cleared"})
+
 
 class StatsView(APIView):
     def get(self, request):
@@ -354,110 +375,397 @@ class StatsView(APIView):
         }
         return Response(stats)
 
+
+# =============================================================================
+# AUDIO CONVERSION UTILITIES
+# =============================================================================
+
+def convert_audio_to_raw_pcm(input_path, output_path, sample_rate=16000):
+    """
+    Convert any audio file to raw PCM s16le mono at target sample rate.
+    Tries ffmpeg first, falls back to pydub, then pure Python.
+    """
+    # Try ffmpeg first (best quality)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', input_path, '-ar', str(sample_rate), '-ac', '1', '-f', 's16le', output_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return True
+    except FileNotFoundError:
+        pass  # ffmpeg not installed
+    except Exception as e:
+        logger.warning(f"ffmpeg conversion failed: {e}")
+
+    # Fallback to pydub
+    if PYDUB_AVAILABLE:
+        try:
+            audio = AudioSegment.from_file(input_path)
+            audio = audio.set_channels(1).set_frame_rate(sample_rate).set_sample_width(2)
+            raw_data = audio.raw_data
+            with open(output_path, 'wb') as f:
+                f.write(raw_data)
+            return True
+        except Exception as e:
+            logger.warning(f"pydub conversion failed: {e}")
+
+    return False
+
+
+def raw_pcm_to_wav(raw_pcm_bytes, sample_rate=24000, channels=1, sample_width=2):
+    """Wrap raw PCM data in a WAV header for browser playback."""
+    import wave
+    import io
+
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, 'wb') as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(raw_pcm_bytes)
+    wav_io.seek(0)
+    return wav_io.read()
+
+
+# =============================================================================
+# CARTESIA WEBSOCKET STT (Speech-to-Text)
+# =============================================================================
+
 class STTView(APIView):
+    """
+    Speech-to-Text via Cartesia WebSocket API.
+    Accepts multipart audio file upload, converts to raw PCM s16le 16kHz mono,
+    streams to Cartesia STT WebSocket, returns transcript.
+
+    WARNING: This blocks a gunicorn sync worker for the entire STT session.
+    For production, use the async WebSocket consumer (CartesiaSTTConsumer) instead.
+    """
+
     def post(self, request):
         if 'audio' not in request.FILES:
             return Response({"error": "No audio file provided"}, status=400)
 
         audio_file = request.FILES['audio']
-
-        # DEBUG: check what Django actually received
-        print(f"[STT] Django received: name={audio_file.name}, size={audio_file.size}, type={audio_file.content_type}")
+        logger.info(f"[STT] Received: name={audio_file.name}, size={audio_file.size}, type={audio_file.content_type}")
 
         if audio_file.size == 0:
-            return Response({"error": "Empty audio file received from browser"}, status=400)
+            return Response({"error": "Empty audio file"}, status=400)
 
-        if not settings.CARTESIA_API_KEY:
+        api_key = getattr(settings, 'CARTESIA_API_KEY', '')
+        if not api_key:
             return Response({"error": "Cartesia API key not configured"}, status=500)
 
-        # Write uploaded file to a real temp file on disk.
-        # This is the most reliable way to forward it to Cartesia.
-        suffix = os.path.splitext(audio_file.name)[1] or '.webm'
-        tmp_path = None
+        if not WEBSOCKET_CLIENT_AVAILABLE:
+            return Response({
+                "error": "websocket-client not installed. Run: pip install websocket-client"
+            }, status=500)
+
+        tmp_in_path = None
+        tmp_out_path = None
+
         try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            suffix = os.path.splitext(audio_file.name)[1] or '.webm'
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
                 for chunk in audio_file.chunks():
-                    tmp.write(chunk)
-                tmp_path = tmp.name
+                    tmp_in.write(chunk)
+                tmp_in_path = tmp_in.name
 
-            print(f"[STT] Temp file written: {tmp_path}, size={os.path.getsize(tmp_path)}")
+            with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as tmp_out:
+                tmp_out_path = tmp_out.name
 
-            # Now open the real file in binary mode for requests
-            with open(tmp_path, 'rb') as f:
-                resp = requests.post(
-                    "https://api.cartesia.ai/stt",
-                    headers={
-                        "Authorization": f"Bearer {settings.CARTESIA_API_KEY}",
-                        "Cartesia-Version": "2026-03-01",
-                    },
-                    files={
-                        "file": (
-                            audio_file.name,
-                            f,
-                            audio_file.content_type or "audio/webm",
-                        )
-                    },
-                    data={
-                        "model": "ink-whisper",
-                        "language": "en",
-                    },
-                    timeout=120,
-                )
+            # Convert to raw PCM
+            success = convert_audio_to_raw_pcm(tmp_in_path, tmp_out_path, sample_rate=16000)
+            if not success:
+                return Response({
+                    "error": "Audio conversion failed. Install ffmpeg or pydub. "
+                             "Docker: RUN apt-get update && apt-get install -y ffmpeg"
+                }, status=500)
 
-            print(f"[STT] Cartesia response: {resp.status_code} {resp.text[:200]}")
+            raw_size = os.path.getsize(tmp_out_path)
+            logger.info(f"[STT] Converted PCM: {raw_size} bytes")
 
-            if resp.status_code != 200:
-                return Response(
-                    {"error": f"Cartesia STT error: {resp.status_code} - {resp.text}"},
-                    status=500,
-                )
+            if raw_size == 0:
+                return Response({"error": "Audio conversion produced empty output"}, status=500)
 
-            data = resp.json()
-            return Response({"transcript": data.get("text", "")})
+            with open(tmp_out_path, 'rb') as f:
+                raw_audio = f.read()
+
+            transcript = self._transcribe_via_websocket(raw_audio, api_key)
+            return Response({"transcript": transcript})
 
         except Exception as e:
-            print(f"[STT] Exception: {e}")
+            logger.error(f"[STT] Exception: {e}")
             return Response({"error": str(e)}, status=500)
-
         finally:
-            # Always clean up the temp file
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            if tmp_in_path and os.path.exists(tmp_in_path):
+                os.unlink(tmp_in_path)
+            if tmp_out_path and os.path.exists(tmp_out_path):
+                os.unlink(tmp_out_path)
+
+    def _transcribe_via_websocket(self, raw_audio: bytes, api_key: str) -> str:
+        url = (
+            "wss://api.cartesia.ai/stt/websocket"
+            "?model=ink-whisper&language=en&encoding=pcm_s16le&sample_rate=16000"
+        )
+
+        transcripts = []
+        done_event = threading.Event()
+        error_msg = [None]
+        connected = [False]
+
+        def on_open(ws):
+            connected[0] = True
+
+        def on_message(ws, message):
+            if isinstance(message, str):
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    return
+                msg_type = data.get("type")
+                if msg_type == "transcript" and data.get("is_final"):
+                    transcripts.append(data.get("text", ""))
+                    logger.debug(f"[STT] Final transcript chunk: {data.get('text', '')}")
+                elif msg_type in ("done", "flush_done"):
+                    logger.info("[STT] Received 'done' from Cartesia")
+                    done_event.set()
+                elif msg_type == "error":
+                    error_msg[0] = data.get("message", "Unknown error")
+                    logger.error(f"[STT] Cartesia error message: {error_msg[0]}")
+                    done_event.set()
+
+        def on_error(ws, error):
+            err_str = str(error)
+            # Ignore normal close frames and errors after we're already done
+            if "Close message" in err_str or "close" in err_str.lower():
+                if done_event.is_set():
+                    logger.debug(f"[STT] Ignoring close-frame error after done: {err_str}")
+                    return
+                # If not done, treat as signal to finish
+                logger.warning(f"[STT] Connection closed unexpectedly: {err_str}")
+                done_event.set()
+                return
+            if not done_event.is_set():
+                error_msg[0] = err_str
+                logger.error(f"[STT] WebSocket error: {err_str}")
+                done_event.set()
+
+        def on_close(ws, close_status_code, close_msg):
+            logger.info(f"[STT] WebSocket closed: code={close_status_code}, msg={close_msg}")
+            done_event.set()
+
+        ws = websocket.WebSocketApp(
+            url,
+            header={"Cartesia-Version": "2026-03-01", "X-API-Key": api_key},
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+
+        ws_thread = threading.Thread(
+            target=ws.run_forever,
+            kwargs={'ping_interval': 30, 'ping_timeout': 10}
+        )
+        ws_thread.daemon = True
+        ws_thread.start()
+
+        # Wait for connection with timeout
+        start = time.time()
+        while not connected[0]:
+            if time.time() - start > 10:
+                ws.close()
+                ws_thread.join(timeout=5)
+                raise TimeoutError("Failed to connect to Cartesia STT within 10s")
+            time.sleep(0.05)
+
+        try:
+            # Stream audio chunks faster (larger chunks, less sleep)
+            chunk_size = 6400  # doubled from 3200
+            total_chunks = len(raw_audio) // chunk_size + (1 if len(raw_audio) % chunk_size else 0)
+            logger.info(f"[STT] Streaming {total_chunks} chunks ({len(raw_audio)} bytes)")
+
+            for i in range(0, len(raw_audio), chunk_size):
+                if not ws.sock or not ws.sock.connected:
+                    logger.warning("[STT] WebSocket disconnected during streaming")
+                    break
+                ws.send(raw_audio[i:i + chunk_size], opcode=websocket.ABNF.OPCODE_BINARY)
+                # Adaptive sleep: shorter for more chunks
+                time.sleep(0.01)
+
+            if ws.sock and ws.sock.connected:
+                logger.info("[STT] Sending finalize")
+                ws.send("finalize")
+                ws.send("done")
+
+            # Wait longer for transcription — must be < gunicorn timeout
+            wait_timeout = 55  # seconds; keep this < gunicorn timeout
+            logger.info(f"[STT] Waiting for transcription (timeout={wait_timeout}s)")
+            done_event.wait(timeout=wait_timeout)
+
+            if not done_event.is_set():
+                logger.warning("[STT] Timeout waiting for 'done', sending close")
+                ws.send("close")
+                done_event.wait(timeout=5)
+        finally:
+            ws.close()
+            ws_thread.join(timeout=5)
+
+        if error_msg[0]:
+            raise RuntimeError(f"Cartesia STT error: {error_msg[0]}")
+
+        result = " ".join(transcripts).strip()
+        logger.info(f"[STT] Transcription complete: {len(result)} chars")
+        return result
+
+
+# =============================================================================
+# CARTESIA WEBSOCKET TTS (Text-to-Speech)
+# =============================================================================
 
 class TTSView(APIView):
+    """
+    Text-to-Speech via Cartesia WebSocket API.
+
+    IMPORTANT: Cartesia TTS WebSocket only supports 'raw' container.
+    We request raw PCM s16le 24kHz, then wrap it in a WAV header for browser playback.
+    """
+
     def post(self, request):
         text = request.data.get("text", "").strip()
         if not text:
             return Response({"error": "Text is required"}, status=400)
 
         config = get_config()
-        voice_id = config.get("cartesia_voice_id", "a5136bf9-224c-4d76-b823-52bd5efcffcc")
-        model_id = config.get("cartesia_model", "sonic-3.5")
-        speed = float(config.get("cartesia_speed", "1.0"))
+        voice_id = request.data.get("voice_id") or config.get(
+            "cartesia_voice_id", "a5136bf9-224c-4d76-b823-52bd5efcffcc"
+        )
+        model_id = request.data.get("model_id") or config.get(
+            "cartesia_model", "sonic-3.5"
+        )
+        speed = float(request.data.get("speed") or config.get("cartesia_speed", "1.0"))
 
-        if not settings.CARTESIA_API_KEY:
+        api_key = getattr(settings, 'CARTESIA_API_KEY', '')
+        if not api_key:
             return Response({"error": "Cartesia API key not configured"}, status=500)
 
+        if not WEBSOCKET_CLIENT_AVAILABLE:
+            return Response({
+                "error": "websocket-client not installed. Run: pip install websocket-client"
+            }, status=500)
+
         try:
-            resp = requests.post(
-                "https://api.cartesia.ai/tts/bytes",
-                headers={
-                    "Authorization": f"Bearer {settings.CARTESIA_API_KEY}",
-                    "Content-Type": "application/json",
-                    "Cartesia-Version": "2024-06-05"
-                },
-                json={
-                    "model_id": model_id,
-                    "transcript": text,
-                    "voice": {"mode": "id", "id": voice_id},
-                    "output_format": {"container": "mp3", "sample_rate": 24000, "encoding": "mp3"},
-                    "language": "en",
-                    "speed": speed
-                },
-                timeout=30
+            # Cartesia WS TTS only supports raw PCM
+            raw_audio = self._synthesize_via_websocket(
+                text=text,
+                voice_id=voice_id,
+                model_id=model_id,
+                speed=speed,
+                api_key=api_key
             )
-            if resp.status_code != 200:
-                return Response({"error": f"Cartesia TTS error: {resp.status_code} - {resp.text}"}, status=500)
-            return HttpResponse(resp.content, content_type="audio/mpeg")
+
+            # Wrap raw PCM in WAV header for browser playback
+            wav_audio = raw_pcm_to_wav(raw_audio, sample_rate=24000, channels=1, sample_width=2)
+            return HttpResponse(wav_audio, content_type="audio/wav")
+
         except Exception as e:
+            logger.error(f"[TTS] WebSocket error: {e}")
             return Response({"error": str(e)}, status=500)
+
+    def _synthesize_via_websocket(self, text, voice_id, model_id, speed, api_key):
+        url = "wss://api.cartesia.ai/tts/websocket"
+        audio_chunks = []
+        done_event = threading.Event()
+        error_msg = [None]
+        context_id = str(uuid.uuid4())
+        connected = [False]
+
+        def on_open(ws):
+            connected[0] = True
+
+        def on_message(ws, message):
+            if isinstance(message, str):
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    return
+                msg_type = data.get("type")
+                if msg_type == "chunk" and data.get("data"):
+                    try:
+                        audio_chunks.append(base64.b64decode(data["data"]))
+                    except Exception:
+                        pass
+                elif msg_type == "done":
+                    done_event.set()
+                elif msg_type == "error":
+                    error_msg[0] = data.get("message", "Unknown Cartesia error")
+                    done_event.set()
+
+        def on_error(ws, error):
+            err_str = str(error)
+            if "Close message" in err_str or "close" in err_str.lower():
+                if done_event.is_set():
+                    return
+                done_event.set()
+                return
+            if not done_event.is_set():
+                error_msg[0] = err_str
+                done_event.set()
+
+        def on_close(ws, close_status_code, close_msg):
+            done_event.set()
+
+        ws = websocket.WebSocketApp(
+            url,
+            header={"Cartesia-Version": "2026-03-01", "X-API-Key": api_key},
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+
+        ws_thread = threading.Thread(
+            target=ws.run_forever,
+            kwargs={'ping_interval': 30, 'ping_timeout': 10}
+        )
+        ws_thread.daemon = True
+        ws_thread.start()
+
+        start = time.time()
+        while not connected[0]:
+            if time.time() - start > 10:
+                ws.close()
+                ws_thread.join(timeout=5)
+                raise TimeoutError("Failed to connect to Cartesia TTS")
+            time.sleep(0.05)
+
+        try:
+            request = {
+                "model_id": model_id,
+                "transcript": text,
+                "voice": {"mode": "id", "id": voice_id},
+                "language": "en",
+                "context_id": context_id,
+                "output_format": {
+                    "container": "raw",
+                    "encoding": "pcm_s16le",
+                    "sample_rate": 24000
+                },
+                "continue": False,
+                "add_timestamps": False
+            }
+            if speed != 1.0:
+                request["generation_config"] = {"speed": speed}
+
+            ws.send(json.dumps(request))
+            done_event.wait(timeout=60)
+        finally:
+            ws.close()
+            ws_thread.join(timeout=5)
+
+        if error_msg[0]:
+            raise RuntimeError(f"Cartesia TTS error: {error_msg[0]}")
+
+        return b"".join(audio_chunks)

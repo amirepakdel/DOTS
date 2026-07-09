@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
 # Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -26,7 +28,8 @@ RUN chmod +x /app/entrypoint.sh
 RUN mkdir -p /var/www/static
 
 # Create non-root user and fix permissions
-RUN useradd -m -u 1000 appuser && \
+RUN chmod +x /app/entrypoint.sh && \
+    useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app /var/www/static
 
 USER appuser

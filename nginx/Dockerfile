@@ -1,5 +1,8 @@
 FROM nginx:alpine
 
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY default.conf /etc/nginx/conf.d/default.conf
+
 RUN apk add --no-cache certbot openssl bash
 
 RUN mkdir -p /var/www/certbot /etc/nginx/templates

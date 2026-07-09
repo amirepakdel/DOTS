@@ -39,6 +39,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - .:/app
       - static_volume:/var/www/static
     restart: unless-stopped
 

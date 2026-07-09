@@ -131,12 +131,44 @@ def check_authority(user_message):
             })
     return violations
 
+# Add this new function for authority rules
+def add_authority_to_vectorstore(rule):
+    doc_content = (
+        f"Action: {rule.action_type}\nAllowed: {rule.allowed}\n"
+        f"Condition: {rule.condition}\nFallback: {rule.fallback_behavior}"
+    )
+    doc = text_splitter.create_documents(
+        [doc_content],
+        metadatas=[{"source": f"authority:{rule.action_type}", "id": str(rule.id)}]
+    )
+    vs = get_vectorstore()
+    vs.add_documents(doc)
+
 def get_relevant_decisions(user_message, top_k=3):
     vs = get_vectorstore()
     try:
-        docs = vs.similarity_search(user_message, k=top_k, filter={"source": {"$regex": "^decision:"}})
-        return docs
-    except Exception:
+        docs = vs.similarity_search(user_message, k=top_k * 5)
+        filtered = [
+            d for d in docs 
+            if d.metadata.get("source", "").startswith("decision:")
+        ]
+        return filtered[:top_k]
+    except Exception as e:
+        logger.error(f"Decision similarity search failed: {e}")
+        return []
+
+# NEW: Semantic search for authority rules
+def get_relevant_authority_rules(user_message, top_k=3):
+    vs = get_vectorstore()
+    try:
+        docs = vs.similarity_search(user_message, k=top_k * 5)
+        filtered = [
+            d for d in docs 
+            if d.metadata.get("source", "").startswith("authority:")
+        ]
+        return filtered[:top_k]
+    except Exception as e:
+        logger.error(f"Authority similarity search failed: {e}")
         return []
 
 def get_relevant_behaviors(situations):
@@ -152,7 +184,9 @@ def get_relevant_behaviors(situations):
                 break
     return matched[:2]
 
-def build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors):
+def build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors, authority_docs=None):
+    authority_docs = authority_docs or []
+    
     system = f"""You are {config.get('company_name', 'DTOS')}'s Digital Twin Operating System.
 Your job is to participate in meetings as a regulated autonomous operator, provide evidence-grounded advisory responses, and enforce governance boundaries.
 You must follow ALL authority rules. You must apply appropriate behavior styles.
@@ -171,12 +205,19 @@ If you lack critical information, ask clarifying questions instead of guessing.
     margin = config.get('margin_threshold', '25')
     system += f"\nMINIMUM CONFIDENCE THRESHOLD: {margin}%"
 
+    # 1. Hard keyword violations (from check_authority)
     if violations:
-        system += "\n\n=== AUTHORITY CHECK ==="
+        system += "\n\n=== AUTHORITY CHECK (KEYWORD MATCH) ==="
         for v in violations:
             system += f"\nRULE: {v['rule']}\nALLOWED: {v['allowed']}\nCONDITION: {v['condition']}\nFALLBACK: {v['fallback']}\n"
         if any(v['allowed'] == 'no' for v in violations):
             system += "\nCRITICAL: This triggers a FORBIDDEN authority rule. You MUST refuse and provide the fallback behavior."
+
+    # 2. Semantically similar authority rules (from vectorstore)
+    if authority_docs:
+        system += "\n\n=== RELEVANT AUTHORITY RULES (SEMANTIC MATCH) ==="
+        for i, doc in enumerate(authority_docs, 1):
+            system += f"\n[{i}] {doc.page_content[:400]}..."
 
     if behaviors:
         system += "\n\n=== BEHAVIOR STYLE ==="
@@ -202,7 +243,7 @@ If you lack critical information, ask clarifying questions instead of guessing.
 CURRENT USER QUESTION: {user_message}
 
 INSTRUCTIONS:
-1. Check if this violates any authority rules. If yes, REFUSE and explain fallback.
+1. Check if this violates any authority rules (keyword or semantic). If yes, REFUSE and explain fallback.
 2. Detect the situation type and apply matching persona behavior style (tone, do/don't).
 3. Use relevant decision patterns as precedent.
 4. Show step-by-step reasoning with evidence sources and confidence levels.
