@@ -1565,8 +1565,8 @@ body {
 
 /* Buttons */
 .btn-primary {
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dim) 100%);
-    color: var(--bg);
+    background: var(--bg-hover);
+    color: var(--text-muted);
     border: none;
     padding: 14px 24px;
     border-radius: var(--radius-sm);
@@ -1594,8 +1594,10 @@ body {
 }
 
 .btn-primary:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 28px var(--primary-glow-intense);
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-glow);
+    box-shadow: 0 0 20px var(--primary-glow);
 }
 
 .btn-primary:active { transform: translateY(0); }
@@ -1742,16 +1744,18 @@ body {
 
 /* Call button (phone) */
 #callBtn.compact-btn {
-    background: linear-gradient(135deg, var(--success) 0%, var(--success-dim) 100%);
+    background: var(--bg-hover);
     border: none;
-    color: white;
+    color: var(--text-muted);
     box-shadow: 0 2px 12px rgba(46, 213, 115, 0.2);
     padding: 0;
 }
 
 #callBtn.compact-btn:hover {
-    transform: scale(1.1);
-    box-shadow: 0 4px 20px rgba(46, 213, 115, 0.35);
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-glow);
+    box-shadow: 0 0 20px var(--primary-glow);
 }
 
 #callBtn.compact-btn.active {

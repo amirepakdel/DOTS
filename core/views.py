@@ -17,9 +17,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.views.generic import TemplateView
+
 from .models import *
 from .serializers import *
 from .governance import *
+
 from django.conf import settings
 
 try:
@@ -28,7 +30,6 @@ try:
 except ImportError:
     WEBSOCKET_CLIENT_AVAILABLE = False
 
-# Optional: pydub for audio conversion without ffmpeg
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
@@ -60,6 +61,7 @@ class ConfigView(APIView):
                 key=key,
                 defaults={'value': str(value)}
             )
+        invalidate_config_cache()
         return Response({"status": "updated", "config": get_config()})
 
 
@@ -112,6 +114,7 @@ class BehaviorViewSet(viewsets.ModelViewSet):
             add_behavior_to_vectorstore(serializer.instance)
         except Exception as e:
             logger.error(f"Vector store sync failed for behavior: {e}")
+        invalidate_behavior_cache()
         return Response({"status": "added", "id": serializer.instance.id})
 
     @action(detail=True, methods=['post'])
@@ -119,10 +122,12 @@ class BehaviorViewSet(viewsets.ModelViewSet):
         behavior = self.get_object()
         behavior.active = not behavior.active
         behavior.save()
+        invalidate_behavior_cache()
         return Response({"status": "toggled", "active": behavior.active})
 
     def destroy(self, request, *args, **kwargs):
         super().destroy(request, *args, **kwargs)
+        invalidate_behavior_cache()
         return Response({"status": "deleted"})
 
 
@@ -138,6 +143,11 @@ class AuthorityViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        try:
+            add_authority_to_vectorstore(serializer.instance)
+        except Exception as e:
+            logger.error(f"Vector store sync failed for authority: {e}")
+        invalidate_authority_cache()
         return Response({"status": "added", "id": serializer.instance.id})
 
     @action(detail=True, methods=['post'])
@@ -145,10 +155,12 @@ class AuthorityViewSet(viewsets.ModelViewSet):
         rule = self.get_object()
         rule.active = not rule.active
         rule.save()
+        invalidate_authority_cache()
         return Response({"status": "toggled", "active": rule.active})
 
     def destroy(self, request, *args, **kwargs):
         super().destroy(request, *args, **kwargs)
+        invalidate_authority_cache()
         return Response({"status": "deleted"})
 
 
@@ -227,6 +239,11 @@ class FlagViewSet(viewsets.ModelViewSet):
                 fallback_behavior=admin_answer
             )
             converted_id = a.id
+            try:
+                add_authority_to_vectorstore(a)
+            except Exception as e:
+                logger.error(f"Vector store sync failed for converted authority: {e}")
+            invalidate_authority_cache()
 
         flag.status = 'resolved'
         flag.admin_answer = admin_answer
@@ -254,31 +271,28 @@ class FlagViewSet(viewsets.ModelViewSet):
         })
 
 
+# =============================================================================
+# CHAT (OPTIMIZED WITH PARALLEL GOVERNANCE & MODEL TIERING)
+# =============================================================================
+
 class ChatView(APIView):
-    """Standard non-streaming chat endpoint with detailed governance trace."""
+    """Standard non-streaming chat with parallel governance & fast model routing."""
 
     def _calculate_confidence(self, violations, decisions, behaviors):
-        """Calculate a 0-100 confidence score based on match quality."""
-        score = 75  # base confidence
+        score = 75
         if any(v['allowed'] == 'no' for v in violations):
-            score = 95  # High confidence when refusing (clear rule)
+            score = 95
         elif any(v['allowed'] == 'conditional' for v in violations):
-            score = 65  # Lower when conditional
-        if len(decisions) > 0:
-            score += min(len(decisions) * 5, 15)  # +5 per relevant decision, max +15
-        if len(behaviors) > 0:
-            score += min(len(behaviors) * 3, 6)   # +3 per behavior, max +6
+            score = 65
+        score += min(len(decisions) * 5, 15)
+        score += min(len(behaviors) * 3, 6)
         return min(score, 100)
 
     def _build_reasoning_trace(self, situations, violations, decisions, behaviors, authority_docs=None):
-        """Build a detailed human-readable reasoning summary for managers."""
         trace_parts = []
-        
-        # Stage 1: Input summary
         trace_parts.append("=== Stage 1: Input Analysis ===")
         trace_parts.append("Message received and validated. History context loaded.")
         
-        # Stage 2: Situation detection
         trace_parts.append("\n=== Stage 2: Situation Detection ===")
         if situations:
             trace_parts.append(f"Detected {len(situations)} situation(s): {', '.join(situations)}.")
@@ -296,7 +310,6 @@ class ChatView(APIView):
         else:
             trace_parts.append("No specific situations detected. Default advisory mode.")
         
-        # Stage 3: Authority check
         trace_parts.append("\n=== Stage 3: Authority Check ===")
         trace_parts.append("Layer 1 (Keyword Match): Scanned all active authority rules against message content.")
         if violations:
@@ -310,7 +323,6 @@ class ChatView(APIView):
         else:
             trace_parts.append("  → No keyword violations found.")
         
-        # Layer 2: Semantic authority
         trace_parts.append("\nLayer 2 (Semantic Search): Queried vectorstore for semantically similar authority rules.")
         if authority_docs:
             trace_parts.append(f"  → Found {len(authority_docs)} relevant rule(s) via embedding similarity.")
@@ -319,7 +331,6 @@ class ChatView(APIView):
         else:
             trace_parts.append("  → No additional semantic matches above threshold.")
         
-        # Stage 4: KB Retrieval
         trace_parts.append("\n=== Stage 4: Knowledge Base Retrieval ===")
         if decisions:
             trace_parts.append(f"Retrieved {len(decisions)} decision pattern(s) from PGVector:")
@@ -336,7 +347,6 @@ class ChatView(APIView):
         else:
             trace_parts.append("No behavior styles matched.")
         
-        # Stage 5: Response Build
         trace_parts.append("\n=== Stage 5: Response Build ===")
         trace_parts.append("Master prompt assembled with all governance context injected.")
         trace_parts.append("LLM invoked with temperature=0.3 (deterministic mode).")
@@ -344,14 +354,13 @@ class ChatView(APIView):
         return "\n".join(trace_parts)
 
     def _build_references(self, decisions, behaviors, violations, authority_docs=None):
-        """Build reference list with IDs, titles, and similarity scores."""
         refs = []
         for d in decisions:
             refs.append({
                 "id": f"dec-{d.metadata.get('id', 'unknown')}",
                 "type": "decision",
                 "title": d.page_content[:60] + "..." if len(d.page_content) > 60 else d.page_content,
-                "score": 0.85,  # Could compute actual cosine similarity
+                "score": 0.85,
                 "source": d.metadata.get('source', 'unknown')
             })
         for v in violations:
@@ -401,20 +410,25 @@ class ChatView(APIView):
 
         save_message(session_id, "user", user_message)
 
-        decisions = []
-        behaviors = []
-        authority_docs = []
-        
-        if use_kb:
-            decisions = get_relevant_decisions(user_message, top_k=3)
-            behaviors = get_relevant_behaviors(situations)
-            # NEW: Also get semantic authority rules
-            authority_docs = get_relevant_authority_rules(user_message, top_k=2)
+        # Determine model tier before any heavy lifting
+        complexity = estimate_complexity(user_message, situations, violations)
 
-        history = get_history(session_id, limit=int(config.get('max_history', 10)))
+        # Parallel fetch of KB + history (skip if forbidden or KB disabled)
+        decisions, behaviors, authority_docs, history = [], [], [], []
+        if use_kb and not has_forbidden:
+            try:
+                decisions, behaviors, authority_docs, history = fetch_kb_parallel(
+                    user_message, situations, session_id, int(config.get('max_history', 10))
+                )
+            except Exception as e:
+                logger.error(f"Parallel KB fetch failed: {e}")
+                history = get_history(session_id, limit=int(config.get('max_history', 10)))
+        else:
+            history = get_history(session_id, limit=int(config.get('max_history', 10)))
+
         full_prompt = build_master_prompt(
-            user_message, config, history, situations, violations, decisions, behaviors,
-            authority_docs=authority_docs,
+            user_message, config, history, situations, violations,
+            decisions, behaviors, authority_docs=authority_docs,
             include_reasoning_in_output=False
         )
 
@@ -422,18 +436,23 @@ class ChatView(APIView):
         model_used = "unknown"
 
         try:
-            if settings.ANTHROPIC_API_KEY:
+            if complexity == "fast" and not has_forbidden:
+                # Fast path: gpt-4o-mini with 512 token limit
+                response = llm.invoke(full_prompt)
+                reply = getattr(response, 'content', None)
+                model_used = "gpt-4o-mini-fast"
+            elif settings.ANTHROPIC_API_KEY:
                 try:
                     response = llm_anthropic.invoke(full_prompt)
                     reply = getattr(response, 'content', None)
                     model_used = "claude-3-5-sonnet"
                 except Exception as e:
                     logger.error(f"Anthropic error: {type(e).__name__}: {e}")
-                    response = llm_openai.invoke(full_prompt)
+                    response = llm.invoke(full_prompt)
                     reply = getattr(response, 'content', None)
                     model_used = "gpt-4o-mini (fallback)"
             else:
-                response = llm_openai.invoke(full_prompt)
+                response = llm.invoke(full_prompt)
                 reply = getattr(response, 'content', None)
                 model_used = "gpt-4o-mini"
         except Exception as e:
@@ -460,13 +479,8 @@ class ChatView(APIView):
 
         save_message(session_id, "assistant", reply)
 
-        # Calculate confidence
         confidence = self._calculate_confidence(violations, decisions, behaviors)
-        
-        # Build detailed reasoning trace
         reasoning_trace = self._build_reasoning_trace(situations, violations, decisions, behaviors, authority_docs)
-        
-        # Build references
         references = self._build_references(decisions, behaviors, violations, authority_docs)
 
         suggest_flag = False
@@ -509,7 +523,7 @@ class ChatView(APIView):
                 "reasoning_trace": reasoning_trace,
                 "references": references,
                 "model_used": model_used,
-                "prompt_tokens_estimate": len(full_prompt.split()),  # Rough estimate
+                "prompt_tokens_estimate": len(full_prompt.split()),
                 "timestamp": timezone.now().isoformat(),
                 "pipeline_stages": {
                     "input_analysis": {"status": "completed", "history_loaded": len(history)},
@@ -529,7 +543,8 @@ class ChatView(APIView):
                     "response_build": {
                         "status": "completed",
                         "model": model_used,
-                        "temperature": 0.3
+                        "temperature": 0.3,
+                        "complexity_tier": complexity
                     }
                 }
             }
@@ -537,11 +552,7 @@ class ChatView(APIView):
 
 
 class ChatStreamView(APIView):
-    """
-    Streaming chat endpoint for real-time voice calls.
-    Returns Server-Sent Events (SSE) with text chunks as they are generated.
-    Includes thoughts metadata in the final done chunk.
-    """
+    """Streaming chat with parallel governance & early metadata emission."""
 
     def post(self, request):
         user_message = request.data.get("message", "").strip()
@@ -558,7 +569,15 @@ class ChatStreamView(APIView):
             has_forbidden = any(v['allowed'] == 'no' for v in violations)
             has_conditional = any(v['allowed'] == 'conditional' for v in violations)
 
-            # Handle forbidden immediately
+            # Emit governance metadata immediately (zero-LLM latency feedback)
+            yield f"data: {json.dumps({
+                'type': 'meta',
+                'situations': situations,
+                'violations': len(violations),
+                'has_forbidden': has_forbidden,
+                'model_selected': 'claude-3-5-sonnet' if settings.ANTHROPIC_API_KEY else 'gpt-4o-mini'
+            })}\n\n"
+
             if has_forbidden:
                 fallback = violations[0].get('fallback', 'This action is not permitted.')
                 yield f"data: {json.dumps({'text': fallback, 'done': False})}\n\n"
@@ -567,26 +586,38 @@ class ChatStreamView(APIView):
 
             save_message(session_id, "user", user_message)
 
-            decisions = []
-            behaviors = []
-            authority_docs = []
+            # Parallel KB fetch using threads (no asyncio event loop issues)
+            decisions, behaviors, authority_docs, history = [], [], [], []
             if use_kb:
-                decisions = get_relevant_decisions(user_message, top_k=3)
-                behaviors = get_relevant_behaviors(situations)
-                authority_docs = get_relevant_authority_rules(user_message, top_k=2)
+                try:
+                    decisions, behaviors, authority_docs, history = fetch_kb_parallel(
+                        user_message, situations, session_id, int(config.get('max_history', 10))
+                    )
+                except Exception as e:
+                    logger.error(f"Parallel KB fetch failed in stream: {e}")
+                    history = get_history(session_id, limit=int(config.get('max_history', 10)))
+            else:
+                history = get_history(session_id, limit=int(config.get('max_history', 10)))
 
-            history = get_history(session_id, limit=int(config.get('max_history', 10)))
             full_prompt = build_master_prompt(
-                user_message, config, history, situations, violations, decisions, behaviors,
-                authority_docs=authority_docs,
+                user_message, config, history, situations, violations,
+                decisions, behaviors, authority_docs=authority_docs,
                 include_reasoning_in_output=False
             )
 
+            complexity = estimate_complexity(user_message, situations, violations)
             full_reply = ""
+            model_used = "unknown"  # FIXED: initialize before try
 
             try:
-                # Try Anthropic streaming first
-                if settings.ANTHROPIC_API_KEY:
+                if complexity == "fast" and not has_forbidden:
+                    for chunk in llm.stream(full_prompt):
+                        text = getattr(chunk, 'content', str(chunk)) or ""
+                        if text:
+                            full_reply += text
+                            yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                    model_used = "gpt-4o-mini-fast"
+                elif settings.ANTHROPIC_API_KEY:
                     try:
                         for chunk in llm_anthropic.stream(full_prompt):
                             text = ""
@@ -601,27 +632,29 @@ class ChatStreamView(APIView):
                                     text = str(chunk.content)
                             else:
                                 text = str(chunk)
-
                             if text:
                                 full_reply += text
                                 yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                        model_used = "claude-3-5-sonnet"
                     except Exception as e:
                         logger.error(f"Anthropic stream error: {e}")
-                        # Fallback to OpenAI
-                        for chunk in llm_openai.stream(full_prompt):
+                        for chunk in llm.stream(full_prompt):
                             text = getattr(chunk, 'content', str(chunk)) or ""
                             if text:
                                 full_reply += text
                                 yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                        model_used = "gpt-4o-mini (fallback)"
                 else:
-                    for chunk in llm_openai.stream(full_prompt):
+                    for chunk in llm.stream(full_prompt):
                         text = getattr(chunk, 'content', str(chunk)) or ""
                         if text:
                             full_reply += text
                             yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                    model_used = "gpt-4o-mini"
 
             except Exception as e:
                 error_text = f"Error: {str(e)}"
+                logger.error(f"Streaming LLM error: {e}")
                 yield f"data: {json.dumps({'text': error_text, 'done': False})}\n\n"
 
             finally:
@@ -650,7 +683,7 @@ class ChatStreamView(APIView):
                     },
                     "reasoning_trace": reasoning_trace,
                     "references": references,
-                    "model_used": "claude-3-5-sonnet" if settings.ANTHROPIC_API_KEY else "gpt-4o-mini",
+                    "model_used": model_used,
                     "timestamp": timezone.now().isoformat()
                 }
                 
@@ -759,14 +792,10 @@ class StatsView(APIView):
 
 
 # =============================================================================
-# AUDIO CONVERSION UTILITIES
+# AUDIO UTILITIES
 # =============================================================================
 
 def convert_audio_to_raw_pcm(input_path, output_path, sample_rate=16000):
-    """
-    Convert any audio file to raw PCM s16le mono at target sample rate.
-    Tries ffmpeg first, falls back to pydub, then pure Python.
-    """
     import subprocess
     try:
         result = subprocess.run(
@@ -795,10 +824,8 @@ def convert_audio_to_raw_pcm(input_path, output_path, sample_rate=16000):
 
 
 def raw_pcm_to_wav(raw_pcm_bytes, sample_rate=24000, channels=1, sample_width=2):
-    """Wrap raw PCM data in a WAV header for browser playback."""
     import wave
     import io
-
     wav_io = io.BytesIO()
     with wave.open(wav_io, 'wb') as wav_file:
         wav_file.setnchannels(channels)
@@ -810,16 +837,10 @@ def raw_pcm_to_wav(raw_pcm_bytes, sample_rate=24000, channels=1, sample_width=2)
 
 
 # =============================================================================
-# CARTESIA WEBSOCKET STT (Speech-to-Text)
+# STT (OPTIMIZED CHUNK SIZE)
 # =============================================================================
 
 class STTView(APIView):
-    """
-    Speech-to-Text via Cartesia WebSocket API.
-    Accepts multipart audio file upload, converts to raw PCM s16le 16kHz mono,
-    streams to Cartesia STT WebSocket, returns transcript.
-    """
-
     def post(self, request):
         if 'audio' not in request.FILES:
             return Response({"error": "No audio file provided"}, status=400)
@@ -855,8 +876,7 @@ class STTView(APIView):
             success = convert_audio_to_raw_pcm(tmp_in_path, tmp_out_path, sample_rate=16000)
             if not success:
                 return Response({
-                    "error": "Audio conversion failed. Install ffmpeg or pydub. "
-                             "Docker: RUN apt-get update && apt-get install -y ffmpeg"
+                    "error": "Audio conversion failed. Install ffmpeg or pydub."
                 }, status=500)
 
             raw_size = os.path.getsize(tmp_out_path)
@@ -954,7 +974,7 @@ class STTView(APIView):
             time.sleep(0.05)
 
         try:
-            chunk_size = 6400
+            chunk_size = 10240
             total_chunks = len(raw_audio) // chunk_size + (1 if len(raw_audio) % chunk_size else 0)
             logger.info(f"[STT] Streaming {total_chunks} chunks ({len(raw_audio)} bytes)")
 
@@ -988,15 +1008,10 @@ class STTView(APIView):
 
 
 # =============================================================================
-# CARTESIA WEBSOCKET TTS (Text-to-Speech)
+# TTS
 # =============================================================================
 
 class TTSView(APIView):
-    """
-    Text-to-Speech via Cartesia WebSocket API.
-    Returns WAV file for browser playback.
-    """
-
     def post(self, request):
         text = request.data.get("text", "").strip()
         if not text:

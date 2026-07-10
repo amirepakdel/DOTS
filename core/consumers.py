@@ -75,7 +75,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
         # --- Step 2: Handle client messages ---
         try:
             if bytes_data:
-                # FIX: Forward raw PCM bytes directly as binary frames
+                # Forward raw PCM bytes directly as binary frames
                 await self.cartesia_ws.send(bytes_data)
             elif text_data:
                 if text_data in ("finalize", "close", "done"):
@@ -132,10 +132,6 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
             await self.close()
 
     async def _relay_cartesia_to_client(self):
-        """
-        Relay transcripts from Cartesia back to the browser in real-time.
-        For continuous streaming, we forward all transcript events immediately.
-        """
         try:
             async for message in self.cartesia_ws:
                 if isinstance(message, str):
@@ -143,7 +139,6 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
                     msg_type = data.get("type")
 
                     if msg_type == "transcript":
-                        # Forward transcript immediately (both interim and final)
                         await self.send_json({
                             "type": "transcript",
                             "text": data.get("text", ""),
@@ -159,7 +154,6 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
                         })
 
                     elif msg_type == "flush_done":
-                        # FIX: Handle flush_done - sent after finalize completes
                         await self.send_json({
                             "type": "flush_done",
                             "context_id": data.get("context_id")
@@ -193,7 +187,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
 class CartesiaTTSConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer proxying browser text -> Cartesia TTS WebSocket.
-    FIXED: Streams audio chunks immediately for real-time playback.
+    Streams audio chunks immediately for real-time playback.
     """
 
     CARTESIA_WS_URL = "wss://api.cartesia.ai/tts/websocket"
@@ -305,7 +299,6 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
 
                 await self.cartesia_ws.send(json.dumps(request))
 
-                # Track state
                 if context_id not in self.active_contexts:
                     self.active_contexts[context_id] = {"finalized": False, "buffer": bytearray()}
                 self.active_contexts[context_id]["finalized"] = not is_continue
@@ -396,7 +389,7 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
 
     async def _relay_cartesia_to_client(self):
         """
-        FIXED: Stream audio + metadata from Cartesia back immediately.
+        Stream audio + metadata from Cartesia back immediately.
         No buffering — sends each chunk as it arrives for real-time playback.
         """
         try:
@@ -409,14 +402,12 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                     if msg_type == "chunk" and data.get("data"):
                         audio_bytes = base64.b64decode(data["data"])
 
-                        # Accumulate for potential download
                         if context_id and context_id in self.active_contexts:
                             self.active_contexts[context_id]["buffer"].extend(audio_bytes)
 
-                        # ── STREAM AUDIO IMMEDIATELY ──
+                        # STREAM AUDIO IMMEDIATELY
                         await self.send(bytes_data=audio_bytes)
 
-                        # Send metadata
                         await self.send_json({
                             "type": "chunk",
                             "context_id": context_id,
@@ -425,7 +416,6 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                         })
 
                     elif msg_type == "flush_done":
-                        # FIX: Forward flush_done so client knows context is complete
                         await self.send_json({
                             "type": "flush_done",
                             "context_id": context_id
