@@ -10,7 +10,7 @@ let allDecisions = [];
 let allBehaviors = [];
 let allAuthority = [];
 
-// === VOICE STATE ===
+// === VOICE MESSAGE STATE (existing hold-to-record) ===
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
@@ -18,14 +18,8 @@ let recordingStartTime = 0;
 let recordingTimer = null;
 let currentAudio = null;
 
-// === WEBSOCKET VOICE STATE ===
-let sttWs = null;
-let ttsWs = null;
-let audioContext = null;
-let ttsAudioQueue = [];
-let isPlayingTTS = false;
-let ttsCurrentSource = null;
-let ttsSessionActive = false;
+// === VOICE CALL STATE (NEW - real-time conversation) ===
+let callSession = null;
 
 // === DOM ===
 const navItems = document.querySelectorAll('.nav-item');
@@ -42,10 +36,18 @@ const clearBtn = document.getElementById('clearBtn');
 const flagBtn = document.getElementById('flagBtn');
 const useKb = document.getElementById('useKb');
 
+// Voice Message elements
 const voiceBtn = document.getElementById('voiceBtn');
 const voiceLabel = document.getElementById('voiceLabel');
 const voiceWave = document.getElementById('voiceWave');
 const voiceStatus = document.getElementById('voiceStatus');
+
+// Voice Call elements (NEW)
+const callBtn = document.getElementById('callBtn');
+const callLabel = document.getElementById('callLabel');
+const callWave = document.getElementById('callWave');
+const callStatus = document.getElementById('callStatus');
+const callTimer = document.getElementById('callTimer');
 
 const cfgCompany = document.getElementById('cfgCompany');
 const cfgSystem = document.getElementById('cfgSystem');
@@ -61,6 +63,10 @@ const cfgAutoFlagUncertain = document.getElementById('cfgAutoFlagUncertain');
 const cfgVoiceId = document.getElementById('cfgVoiceId');
 const cfgCartesiaModel = document.getElementById('cfgCartesiaModel');
 const cfgVoiceSpeed = document.getElementById('cfgVoiceSpeed');
+const cfgVadSensitivity = document.getElementById('cfgVadSensitivity');
+const cfgSilenceTimeout = document.getElementById('cfgSilenceTimeout');
+const cfgBargeIn = document.getElementById('cfgBargeIn');
+const cfgTtsBuffer = document.getElementById('cfgTtsBuffer');
 const saveConfigBtn = document.getElementById('saveConfigBtn');
 
 const decQuestion = document.getElementById('decQuestion');
@@ -159,13 +165,549 @@ decSearch.addEventListener('input', () => filterDecisions());
 behSearch.addEventListener('input', () => filterBehaviors());
 authSearch.addEventListener('input', () => filterAuthority());
 
+// === VOICE MESSAGE: Hold-to-Record (existing) ===
 voiceBtn.addEventListener('mousedown', startRecording);
 voiceBtn.addEventListener('mouseup', stopRecording);
 voiceBtn.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
 voiceBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
 voiceBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
 
-// === API ===
+// === VOICE CALL: Tap-to-Start (NEW) ===
+callBtn.addEventListener('click', toggleVoiceCall);
+
+// =============================================================================
+// REAL-TIME VOICE CALL SESSION (NEW)
+// =============================================================================
+
+class RealtimeCallSession {
+    constructor() {
+        this.audioContext = null;
+        this.mediaStream = null;
+        this.processor = null;
+        this.source = null;
+        this.sttWs = null;
+        this.ttsWs = null;
+        this.isActive = false;
+        this.isUserSpeaking = false;
+        this.isAiSpeaking = false;
+        this.ttsAudioQueue = [];
+        this.ttsCurrentSource = null;
+        this.interimTranscript = '';
+        this.finalTranscript = '';
+        this.silenceStart = null;
+        this.callStartTime = null;
+        this.callTimerInterval = null;
+        this.ttsTextBuffer = '';           // FIX: renamed for clarity
+        this.currentContextId = null;
+        this.transcriptOverlay = null;
+        this.pendingFinalization = false;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.vadThreshold = parseFloat(cfgVadSensitivity?.value || '0.015');
+        this.silenceTimeout = parseInt(cfgSilenceTimeout?.value || '600');
+        this.bargeInEnabled = (cfgBargeIn?.value || 'true') === 'true';
+        // FIX: Buffer delay 0 because we do sentence-level buffering client-side
+        this.ttsBufferDelay = 0;
+        this.isFirstChunk = true;            // FIX: track first chunk for spacing
+        this.audioQueueOffset = 0;           // FIX: for gapless scheduling
+        this.nextPlayTime = 0;               // FIX: schedule audio gaplessly
+    }
+
+    async start() {
+        if (this.isActive) return;
+        try {
+            this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 16000,
+                    channelCount: 1
+                }
+            });
+            this.audioContext = new AudioContext({ sampleRate: 24000 }); // FIX: TTS outputs 24kHz
+            await this.connectSTT();
+            await this.connectTTS();
+            this.startVAD();
+            this.isActive = true;
+            this.callStartTime = Date.now();
+            this.startCallTimer();
+            this.showTranscriptOverlay();
+            callBtn.classList.add('active');
+            callLabel.textContent = 'End Call';
+            callWave.classList.remove('hidden');
+            callStatus.textContent = 'Listening... Speak naturally';
+            showToast('Voice call started — speak naturally');
+        } catch (err) {
+            console.error('Call start error:', err);
+            showToast('Could not start voice call: ' + err.message, 'error');
+            this.cleanup();
+        }
+    }
+
+    stop() {
+        if (!this.isActive) return;
+        this.isActive = false;
+        this.cleanup();
+        callBtn.classList.remove('active');
+        callLabel.textContent = 'Voice Call';
+        callWave.classList.add('hidden');
+        callStatus.textContent = 'Tap to start a real-time voice conversation';
+        callTimer.classList.add('hidden');
+        this.hideTranscriptOverlay();
+        showToast('Voice call ended');
+    }
+
+    cleanup() {
+        if (this.callTimerInterval) { clearInterval(this.callTimerInterval); this.callTimerInterval = null; }
+        if (this.processor) { try { this.processor.disconnect(); } catch(e) {} this.processor = null; }
+        if (this.source) { try { this.source.disconnect(); } catch(e) {} this.source = null; }
+        if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
+        if (this.audioContext) { try { this.audioContext.close(); } catch(e) {} this.audioContext = null; }
+        if (this.sttWs) { try { this.sttWs.close(); } catch(e) {} this.sttWs = null; }
+        if (this.ttsWs) { try { this.ttsWs.close(); } catch(e) {} this.ttsWs = null; }
+        this.ttsAudioQueue = [];
+        if (this.ttsCurrentSource) { try { this.ttsCurrentSource.stop(); } catch(e) {} this.ttsCurrentSource = null; }
+        this.isAiSpeaking = false;
+        this.isUserSpeaking = false;
+        this.pendingFinalization = false;
+        this.currentContextId = null;
+        this.ttsTextBuffer = '';
+        this.finalTranscript = '';
+        this.interimTranscript = '';
+        this.isFirstChunk = true;
+        this.nextPlayTime = 0;
+    }
+
+    startCallTimer() {
+        callTimer.classList.remove('hidden');
+        this.callTimerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - this.callStartTime) / 1000);
+            const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const secs = String(elapsed % 60).padStart(2, '0');
+            callTimer.textContent = `${mins}:${secs}`;
+        }, 1000);
+    }
+
+    startVAD() {
+        this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
+        this.processor = this.audioContext.createScriptProcessor(1024, 1, 1);
+        this.processor.onaudioprocess = (e) => {
+            if (!this.isActive) return;
+            const input = e.inputBuffer.getChannelData(0);
+            const volume = this.calculateVolume(input);
+            if (volume > this.vadThreshold && this.isAiSpeaking && this.bargeInEnabled) {
+                this.interruptAI();
+            }
+            if (volume > this.vadThreshold) {
+                if (!this.isUserSpeaking) {
+                    this.isUserSpeaking = true;
+                    this.updateCallStatus('You are speaking...');
+                }
+                this.silenceStart = null;
+                const pcm = this.floatToInt16(input);
+                if (this.sttWs?.readyState === WebSocket.OPEN) {
+                    this.sttWs.send(pcm.buffer);
+                }
+            } else {
+                if (this.isUserSpeaking) {
+                    if (!this.silenceStart) {
+                        this.silenceStart = Date.now();
+                    } else if (Date.now() - this.silenceStart > this.silenceTimeout) {
+                        this.isUserSpeaking = false;
+                        this.silenceStart = null;
+                        this.updateCallStatus('Processing...');
+                        if (this.sttWs?.readyState === WebSocket.OPEN && !this.pendingFinalization) {
+                            this.pendingFinalization = true;
+                            this.sttWs.send('finalize');
+                        }
+                    }
+                }
+            }
+        };
+        this.source.connect(this.processor);
+        this.processor.connect(this.audioContext.destination);
+    }
+
+    calculateVolume(buffer) {
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) { sum += buffer[i] * buffer[i]; }
+        return Math.sqrt(sum / buffer.length);
+    }
+
+    floatToInt16(floatArray) {
+        const int16 = new Int16Array(floatArray.length);
+        for (let i = 0; i < floatArray.length; i++) {
+            const s = Math.max(-1, Math.min(1, floatArray[i]));
+            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        return int16;
+    }
+
+    interruptAI() {
+        console.log('[Call] Barge-in detected');
+        this.isAiSpeaking = false;
+        this.ttsAudioQueue = [];
+        if (this.ttsCurrentSource) {
+            try { this.ttsCurrentSource.stop(); } catch(e) {}
+            this.ttsCurrentSource = null;
+        }
+        if (this.ttsWs?.readyState === WebSocket.OPEN && this.currentContextId) {
+            this.ttsWs.send(JSON.stringify({
+                type: 'cancel',
+                context_id: this.currentContextId
+            }));
+        }
+        this.ttsTextBuffer = '';
+        this.currentContextId = null;
+        this.isFirstChunk = true;
+        this.nextPlayTime = 0;
+        this.updateCallStatus('You interrupted — listening...');
+    }
+
+    async connectSTT() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/api/stt/`;
+        return new Promise((resolve, reject) => {
+            this.sttWs = new WebSocket(wsUrl);
+            let resolved = false;
+            this.sttWs.onopen = () => {
+                this.sttWs.send(JSON.stringify({
+                    type: 'config',
+                    model: 'ink-whisper',
+                    language: 'en',
+                    encoding: 'pcm_s16le',
+                    sample_rate: 16000
+                }));
+            };
+            this.sttWs.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'ready') {
+                    if (!resolved) { resolved = true; resolve(); }
+                }
+                else if (data.type === 'transcript') {
+                    if (data.is_final) {
+                        this.finalTranscript = (this.finalTranscript + ' ' + data.text).trim();
+                        this.updateTranscriptOverlay(data.text, false);
+                    } else {
+                        this.interimTranscript = data.text;
+                        this.updateTranscriptOverlay(data.text, true);
+                    }
+                }
+                else if (data.type === 'flush_done') {
+                    this.pendingFinalization = false;
+                    if (this.finalTranscript && !this.isUserSpeaking) {
+                        const text = this.finalTranscript;
+                        this.finalTranscript = '';
+                        this.interimTranscript = '';
+                        this.processUserTurn(text);
+                    }
+                }
+                else if (data.type === 'done') {
+                    this.pendingFinalization = false;
+                }
+                else if (data.type === 'error') {
+                    console.error('[STT] Error:', data.error);
+                    this.pendingFinalization = false;
+                    this.updateCallStatus('STT Error — retrying...');
+                }
+            };
+            this.sttWs.onerror = (err) => {
+                console.error('[STT] WS error:', err);
+                if (!resolved) { resolved = true; reject(err); }
+            };
+            this.sttWs.onclose = () => {
+                if (!resolved) { resolved = true; reject(new Error('STT closed')); }
+                if (this.isActive) {
+                    this.reconnectAttempts++;
+                    if (this.reconnectAttempts <= this.maxReconnectAttempts) {
+                        setTimeout(() => this.connectSTT().catch(console.error), 1000 * this.reconnectAttempts);
+                    }
+                }
+            };
+            setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('STT timeout')); } }, 10000);
+        });
+    }
+
+    async connectTTS() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/api/tts/`;
+        return new Promise((resolve, reject) => {
+            this.ttsWs = new WebSocket(wsUrl);
+            let resolved = false;
+            this.ttsWs.onopen = () => {
+                this.ttsWs.send(JSON.stringify({
+                    type: 'config',
+                    model_id: cfgCartesiaModel.value || 'sonic-3.5',
+                    voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                    language: 'en'
+                }));
+            };
+            this.ttsWs.onmessage = async (event) => {
+                if (event.data instanceof Blob) {
+                    const arrayBuffer = await event.data.arrayBuffer();
+                    // FIX: Schedule for gapless playback instead of queue+shift
+                    this.scheduleAudioPlayback(arrayBuffer);
+                    if (!this.isAiSpeaking) {
+                        this.isAiSpeaking = true;
+                        this.updateCallStatus('DTOS is speaking...');
+                    }
+                    return;
+                }
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'ready') {
+                        if (!resolved) { resolved = true; resolve(); }
+                    }
+                    else if (data.type === 'flush_done') {
+                        // Context fully flushed
+                    }
+                    else if (data.type === 'done') {
+                        // All audio for context delivered, check if done playing
+                        setTimeout(() => {
+                            if (!this.isAiSpeaking && this.ttsAudioQueue.length === 0) {
+                                this.currentContextId = null;
+                                this.updateCallStatus('Listening...');
+                            }
+                        }, 500);
+                    }
+                    else if (data.type === 'error') {
+                        console.error('[TTS] Error:', data.error);
+                    }
+                } catch(e) {}
+            };
+            this.ttsWs.onerror = (err) => {
+                console.error('[TTS] WS error:', err);
+                if (!resolved) { resolved = true; reject(err); }
+            };
+            this.ttsWs.onclose = () => {
+                if (!resolved) { resolved = true; reject(new Error('TTS closed')); }
+                if (this.isActive) {
+                    setTimeout(() => this.connectTTS().catch(console.error), 1000);
+                }
+            };
+            setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('TTS timeout')); } }, 10000);
+        });
+    }
+
+    // FIX: Gapless audio scheduling using AudioContext clock
+    scheduleAudioPlayback(arrayBuffer) {
+        if (!this.audioContext || !this.isActive) return;
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume().catch(() => {});
+        }
+
+        const int16 = new Int16Array(arrayBuffer);
+        if (int16.length === 0) return;
+
+        const float32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) {
+            float32[i] = int16[i] / 32768.0;
+        }
+
+        const audioBuffer = this.audioContext.createBuffer(1, float32.length, 24000);
+        audioBuffer.copyToChannel(float32, 0);
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.audioContext.destination);
+
+        const now = this.audioContext.currentTime;
+        // Start immediately if first chunk, otherwise schedule after previous chunk ends
+        if (this.nextPlayTime <= now) {
+            this.nextPlayTime = now;
+        }
+        source.start(this.nextPlayTime);
+        this.nextPlayTime += audioBuffer.duration;
+
+        // Mark AI as done speaking after last chunk finishes
+        source.onended = () => {
+            const timeUntilEnd = this.nextPlayTime - this.audioContext.currentTime;
+            if (timeUntilEnd <= 0.05) {  // All queued audio has played
+                this.isAiSpeaking = false;
+                this.currentContextId = null;
+                this.isFirstChunk = true;
+                this.updateCallStatus('Listening...');
+            }
+        };
+    }
+
+    async processUserTurn(text) {
+        if (!text || !this.isActive) return;
+        console.log('[Call] User turn:', text);
+        this.updateCallStatus('DTOS is thinking...');
+        appendMessage('user', text);
+        lastQuestion = text;
+        try {
+            const response = await fetch('/api/chat/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: text,
+                    session_id: sessionId,
+                    use_kb: true
+                })
+            });
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let fullResponse = '';
+            this.currentContextId = crypto.randomUUID();
+            this.isFirstChunk = true;
+            this.ttsTextBuffer = '';
+            while (this.isActive) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const chunk = JSON.parse(line.slice(6));
+                            if (chunk.text) {
+                                fullResponse += chunk.text;
+                                this.streamTextToTTS(chunk.text);
+                            }
+                            if (chunk.done) {
+                                lastAiResponse = fullResponse;
+                            }
+                        } catch(e) {}
+                    }
+                }
+            }
+            this.flushTTSBuffer();
+        } catch (err) {
+            console.error('[Call] LLM stream error:', err);
+            this.updateCallStatus('Error — try again');
+        }
+    }
+
+    // FIX: Complete rewrite of text streaming to TTS
+    // Key insight from Cartesia docs: "Streamed inputs should form a valid transcript when joined"
+    // We accumulate text and only send complete sentences, preserving exact spacing
+    streamTextToTTS(textChunk) {
+        if (!this.isActive || !this.ttsWs || this.ttsWs.readyState !== WebSocket.OPEN) return;
+        if (!this.currentContextId) return;
+
+        this.ttsTextBuffer += textChunk;
+
+        // Look for complete sentences (ending with . ! ? followed by space or end)
+        // We need to be careful not to split mid-word
+        let buffer = this.ttsTextBuffer;
+        let sentUpTo = 0;
+
+        // Find all sentence boundaries
+        const sentenceEndRegex = /[.!?]+(?:\s+|$)/g;
+        let match;
+        let lastSentenceEnd = -1;
+
+        while ((match = sentenceEndRegex.exec(buffer)) !== null) {
+            lastSentenceEnd = match.index + match[0].length;
+        }
+
+        if (lastSentenceEnd > 0) {
+            // We have at least one complete sentence
+            const textToSend = buffer.substring(0, lastSentenceEnd);
+            const remaining = buffer.substring(lastSentenceEnd);
+
+            // Send the complete text
+            const payload = {
+                type: 'chunk',
+                context_id: this.currentContextId,
+                text: textToSend,
+                continue: true,
+                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                model_id: cfgCartesiaModel.value || 'sonic-3.5',
+                language: 'en',
+                max_buffer_delay_ms: 0  // FIX: 0 because we buffer client-side
+            };
+
+            const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
+            if (speed !== 1.0) payload.speed = speed;
+
+            console.log('[TTS] Sending chunk:', JSON.stringify({
+                text: textToSend.substring(0, 80) + (textToSend.length > 80 ? '...' : ''),
+                len: textToSend.length,
+                continue: true
+            }));
+
+            this.ttsWs.send(JSON.stringify(payload));
+            this.ttsTextBuffer = remaining;
+        }
+    }
+
+    flushTTSBuffer() {
+        if (this.ttsTextBuffer.length > 0 && this.ttsWs?.readyState === WebSocket.OPEN && this.currentContextId) {
+            const payload = {
+                type: 'chunk',
+                context_id: this.currentContextId,
+                text: this.ttsTextBuffer,
+                continue: false,
+                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                model_id: cfgCartesiaModel.value || 'sonic-3.5',
+                language: 'en',
+                max_buffer_delay_ms: 0
+            };
+            const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
+            if (speed !== 1.0) payload.speed = speed;
+
+            console.log('[TTS] Flushing final chunk:', JSON.stringify({
+                text: this.ttsTextBuffer.substring(0, 80) + (this.ttsTextBuffer.length > 80 ? '...' : ''),
+                len: this.ttsTextBuffer.length,
+                continue: false
+            }));
+
+            this.ttsWs.send(JSON.stringify(payload));
+            this.ttsTextBuffer = '';
+        }
+    }
+
+    updateCallStatus(status) {
+        callStatus.textContent = status;
+    }
+
+    showTranscriptOverlay() {
+        this.transcriptOverlay = document.createElement('div');
+        this.transcriptOverlay.className = 'call-transcript-overlay';
+        this.transcriptOverlay.innerHTML = `
+            <div class="transcript-label">Live Transcript</div>
+            <div class="transcript-text" id="liveTranscript">Say something...</div>
+        `;
+        document.body.appendChild(this.transcriptOverlay);
+    }
+
+    hideTranscriptOverlay() {
+        if (this.transcriptOverlay) {
+            this.transcriptOverlay.remove();
+            this.transcriptOverlay = null;
+        }
+    }
+
+    updateTranscriptOverlay(text, isInterim) {
+        const el = document.getElementById('liveTranscript');
+        if (el) {
+            el.textContent = text || 'Say something...';
+            el.classList.toggle('interim', isInterim);
+        }
+    }
+}
+
+// Toggle voice call on/off
+async function toggleVoiceCall() {
+    if (callSession && callSession.isActive) {
+        callSession.stop();
+        callSession = null;
+    } else {
+        callSession = new RealtimeCallSession();
+        await callSession.start();
+    }
+}
+
+// =============================================================================
+// API & CONFIG
+// =============================================================================
+
 async function loadConfig() {
     try {
         const res = await fetch('/api/config');
@@ -184,6 +726,11 @@ async function loadConfig() {
         cfgVoiceId.value = config.cartesia_voice_id || 'e07c00bc-4134-4eae-9ea4-1a55fb45746b';
         cfgCartesiaModel.value = config.cartesia_model || 'sonic-3.5';
         cfgVoiceSpeed.value = config.cartesia_speed || '1.0';
+
+        if (config.vad_sensitivity) cfgVadSensitivity.value = config.vad_sensitivity;
+        if (config.silence_timeout) cfgSilenceTimeout.value = config.silence_timeout;
+        if (config.barge_in) cfgBargeIn.value = config.barge_in;
+        if (config.tts_buffer_delay) cfgTtsBuffer.value = config.tts_buffer_delay;
     } catch (e) { console.error(e); }
 }
 
@@ -202,7 +749,11 @@ async function saveConfig() {
         auto_flag_uncertain: cfgAutoFlagUncertain.value,
         cartesia_voice_id: cfgVoiceId.value,
         cartesia_model: cfgCartesiaModel.value,
-        cartesia_speed: cfgVoiceSpeed.value
+        cartesia_speed: cfgVoiceSpeed.value,
+        vad_sensitivity: cfgVadSensitivity.value,
+        silence_timeout: cfgSilenceTimeout.value,
+        barge_in: cfgBargeIn.value,
+        tts_buffer_delay: cfgTtsBuffer.value
     };
     saveConfigBtn.disabled = true;
     saveConfigBtn.innerHTML = '<span class="spinner"></span> Saving...';
@@ -238,7 +789,7 @@ function updateBadge(count) {
 }
 
 // =============================================================================
-// WEBSOCKET STT (Speech-to-Text) — NO PROBES, direct connection
+// VOICE MESSAGE: Hold-to-Record (existing — unchanged functionality)
 // =============================================================================
 
 async function audioBufferToRawPCM(audioBuffer, targetSampleRate = 16000) {
@@ -323,14 +874,12 @@ async function processVoiceRecording(mimeType) {
         return;
     }
     const audioBlob = new Blob(audioChunks, { type: mimeType });
-    console.log('Recorded blob size:', audioBlob.size, 'type:', audioBlob.type);
     if (audioBlob.size === 0) {
         showToast('No audio captured. Hold the button longer.', 'error');
         voiceLabel.textContent = 'Hold to speak to DTOS';
         audioChunks = [];
         return;
     }
-    // Try WebSocket STT directly, fallback to HTTP on failure
     try {
         await processVoiceViaWebSocket(audioBlob);
     } catch (e) {
@@ -341,21 +890,19 @@ async function processVoiceRecording(mimeType) {
 
 async function processVoiceViaWebSocket(audioBlob) {
     voiceLabel.textContent = 'Converting audio...';
-    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    let audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const arrayBuffer = await audioBlob.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
     const rawPCM = await audioBufferToRawPCM(audioBuffer, 16000);
-    console.log(`[STT WS] Converted to ${rawPCM.byteLength} bytes of raw PCM`);
 
     voiceLabel.textContent = 'Transcribing via WebSocket...';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/api/stt/`;
-    
+
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(wsUrl);
         const transcriptParts = [];
         let wsReady = false;
-        let wsError = null;
         let resolved = false;
 
         ws.onopen = () => {
@@ -369,20 +916,19 @@ async function processVoiceViaWebSocket(audioBlob) {
             const data = JSON.parse(event.data);
             if (data.type === 'ready') {
                 wsReady = true;
-                // Start streaming audio
                 const chunkSize = 3200;
                 const uint8View = new Uint8Array(rawPCM);
                 (async () => {
                     for (let i = 0; i < uint8View.length; i += chunkSize) {
                         if (ws.readyState !== WebSocket.OPEN) break;
                         ws.send(uint8View.slice(i, i + chunkSize));
-                        await new Promise(r => setTimeout(r, 10)); // faster streaming
+                        await new Promise(r => setTimeout(r, 10));
                     }
                     if (ws.readyState === WebSocket.OPEN) ws.send('finalize');
                 })();
             } else if (data.type === 'transcript' && data.is_final && data.text) {
                 transcriptParts.push(data.text);
-            } else if (data.type === 'done' || data.type === 'flush_done') {
+            } else if (data.type === 'flush_done') {
                 if (!resolved) {
                     resolved = true;
                     ws.close();
@@ -398,8 +944,9 @@ async function processVoiceViaWebSocket(audioBlob) {
                         resolve(transcript);
                     }
                 }
+            } else if (data.type === 'done') {
+                // Session close ack, ignore if already resolved
             } else if (data.type === 'error') {
-                wsError = data.error;
                 if (!resolved) { resolved = true; ws.close(); reject(new Error(data.error)); }
             }
         };
@@ -408,17 +955,8 @@ async function processVoiceViaWebSocket(audioBlob) {
             if (!resolved) { resolved = true; reject(new Error('WebSocket connection failed')); }
         };
 
-        ws.onclose = (e) => {
-            console.error("[STT WS] CLOSED", {
-                code: e.code,
-                reason: e.reason,
-                wasClean: e.wasClean
-            });
-
-            if (!resolved) {
-                resolved = true;
-                reject(new Error('WebSocket closed unexpectedly'));
-            }
+        ws.onclose = () => {
+            if (!resolved) { resolved = true; reject(new Error('WebSocket closed unexpectedly')); }
         };
 
         setTimeout(() => {
@@ -454,73 +992,15 @@ async function processVoiceViaHTTP(audioBlob, mimeType) {
 }
 
 // =============================================================================
-// WEBSOCKET TTS (Text-to-Speech) — Streaming, NO probes
+// TTS PLAYBACK for chat messages (existing — simplified, no WebSocket TTS)
 // =============================================================================
-
-function splitIntoSentences(text) {
-    const matches = text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g);
-    if (!matches) return [text];
-    return matches.map(s => s.trim()).filter(s => s.length > 0);
-}
-
-async function ensureTTSWebSocket() {
-    if (ttsWs && ttsWs.readyState === WebSocket.OPEN) return ttsWs;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/api/tts/`;
-
-    return new Promise((resolve, reject) => {
-        const ws = new WebSocket(wsUrl);
-        let resolved = false;
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({
-                type: 'config',
-                model_id: cfgCartesiaModel.value || 'sonic-3.5',
-                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
-                language: 'en'
-            }));
-        };
-
-        ws.onmessage = (event) => {
-            if (event.data instanceof Blob) {
-                event.data.arrayBuffer().then(ab => {
-                    ttsAudioQueue.push(ab);
-                    if (ttsAudioQueue.length === 1) playNextTTSChunk();
-                });
-                return;
-            }
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'ready') {
-                    if (!resolved) { resolved = true; ttsWs = ws; resolve(ws); }
-                } else if (data.type === 'error') {
-                    if (!resolved) { resolved = true; reject(new Error(data.error)); }
-                    else { console.error('TTS WS error:', data.error); stopTTSPlayback(); }
-                } else if (data.type === 'done') {
-                    // Utterance complete
-                }
-            } catch (e) { console.error('TTS parse error', e); }
-        };
-
-        ws.onerror = () => {
-            if (!resolved) { resolved = true; reject(new Error('TTS WebSocket error')); }
-        };
-
-        ws.onclose = () => {
-            ttsWs = null;
-            if (!resolved) { resolved = true; reject(new Error('TTS WebSocket closed')); }
-        };
-
-        setTimeout(() => {
-            if (!resolved) { resolved = true; ws.close(); reject(new Error('TTS connection timeout')); }
-        }, 10000);
-    });
-}
 
 async function playTTS(text, btnElement) {
     if (btnElement.classList.contains('playing')) {
-        stopTTSPlayback();
+        if (window._ttsAudio) {
+            window._ttsAudio.pause();
+            window._ttsAudio = null;
+        }
         btnElement.classList.remove('playing');
         return;
     }
@@ -528,173 +1008,6 @@ async function playTTS(text, btnElement) {
     document.querySelectorAll('.tts-btn').forEach(b => b.classList.remove('playing'));
     btnElement.classList.add('playing');
 
-    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-    try {
-        const ws = await ensureTTSWebSocket();
-        ttsSessionActive = true;
-        isPlayingTTS = true;
-        ttsAudioQueue = [];
-        
-        const sentences = splitIntoSentences(text);
-        const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
-        
-        // Send each sentence sequentially and play when complete
-        for (let i = 0; i < sentences.length; i++) {
-            if (!ttsSessionActive) break;
-            
-            const sentence = sentences[i];
-            const contextId = crypto.randomUUID();
-            
-            // Accumulate audio chunks for this sentence
-            const chunks = [];
-            let resolved = false;
-            let error = null;
-            
-            // Temporarily override onmessage to capture this sentence's audio
-            const originalOnMessage = ws.onmessage;
-            ws.onmessage = (event) => {
-                if (event.data instanceof Blob) {
-                    // Backend now sends complete sentence audio as one Blob
-                    event.data.arrayBuffer().then(ab => chunks.push(ab));
-                    return;
-                }
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'done' && data.context_id === contextId) {
-                        resolved = true;
-                    } else if (data.type === 'error') {
-                        error = data.error || 'Unknown TTS error';
-                        resolved = true;
-                    }
-                } catch (e) {}
-            };
-            
-            // Send sentence to backend
-            const payload = {
-                type: 'chunk',
-                context_id: contextId,
-                text: sentence + (i < sentences.length - 1 ? ' ' : ''),
-                continue: false,  // Each sentence is a complete utterance
-                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
-                model_id: cfgCartesiaModel.value || 'sonic-3.5',
-                language: 'en',
-                max_buffer_delay_ms: 400
-            };
-            if (speed !== 1.0) payload.speed = speed;
-            
-            ws.send(JSON.stringify(payload));
-            
-            // Wait for this sentence to finish generating
-            await new Promise((resolve, reject) => {
-                const startTime = Date.now();
-                const interval = setInterval(() => {
-                    if (resolved) {
-                        clearInterval(interval);
-                        ws.onmessage = originalOnMessage;
-                        if (error) reject(new Error(error));
-                        else resolve();
-                    } else if (Date.now() - startTime > 30000) {
-                        clearInterval(interval);
-                        ws.onmessage = originalOnMessage;
-                        reject(new Error('TTS sentence timeout'));
-                    }
-                }, 50);
-            });
-            
-            if (!ttsSessionActive) break;
-            
-            // Add complete sentence audio to play queue
-            if (chunks.length > 0) {
-                const totalLength = chunks.reduce((sum, ab) => sum + ab.byteLength, 0);
-                const combined = new Uint8Array(totalLength);
-                let offset = 0;
-                for (const ab of chunks) {
-                    combined.set(new Uint8Array(ab), offset);
-                    offset += ab.byteLength;
-                }
-                ttsAudioQueue.push(combined.buffer);
-                
-                // Start playing if this is the first sentence
-                if (ttsAudioQueue.length === 1 && !ttsCurrentSource) {
-                    playNextTTSChunk();
-                }
-            }
-            
-            // Natural pause between sentences (200ms)
-            if (i < sentences.length - 1) {
-                await new Promise(r => setTimeout(r, 200));
-            }
-        }
-        
-    } catch (e) {
-        console.error('TTS WebSocket failed:', e);
-        showToast(`TTS streaming failed: ${e.message}. Falling back...`, 'error');
-        await playTTSHTTP(text, btnElement);
-    }
-}
-
-function stopTTSPlayback() {
-    ttsSessionActive = false;
-    isPlayingTTS = false;
-    ttsAudioQueue = [];
-    if (ttsCurrentSource) {
-        try { ttsCurrentSource.stop(); } catch (e) {}
-        ttsCurrentSource = null;
-    }
-    if (ttsWs && ttsWs.readyState === WebSocket.OPEN) {
-        try { ttsWs.close(); } catch (e) {}
-    }
-    ttsWs = null;
-    document.querySelectorAll('.tts-btn').forEach(b => b.classList.remove('playing'));
-}
-
-async function playNextTTSChunk() {
-    if (ttsAudioQueue.length === 0 || !audioContext) {
-        // Only mark as not playing if the whole session is done
-        if (!ttsSessionActive) {
-            isPlayingTTS = false;
-            ttsCurrentSource = null;
-        }
-        return;
-    }
-
-    if (audioContext.state === 'suspended') {
-        try { await audioContext.resume(); } catch (e) {}
-    }
-
-    const arrayBuffer = ttsAudioQueue.shift();
-    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-        playNextTTSChunk();
-        return;
-    }
-
-    try {
-        const int16Data = new Int16Array(arrayBuffer);
-        const floatData = new Float32Array(int16Data.length);
-        for (let i = 0; i < int16Data.length; i++) floatData[i] = int16Data[i] / 32768.0;
-
-        const audioBuffer = audioContext.createBuffer(1, floatData.length, 24000);
-        audioBuffer.copyToChannel(floatData, 0);
-
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        ttsCurrentSource = source;
-
-        source.onended = () => {
-            ttsCurrentSource = null;
-            playNextTTSChunk();
-        };
-        source.start();
-    } catch (e) {
-        console.error('Error playing TTS chunk:', e);
-        ttsCurrentSource = null;
-        playNextTTSChunk();
-    }
-}
-
-async function playTTSHTTP(text, btnElement) {
     try {
         const res = await fetch('/api/tts', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -703,10 +1016,10 @@ async function playTTSHTTP(text, btnElement) {
         if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'TTS failed'); }
         const audioBlob = await res.blob();
         const audioUrl = URL.createObjectURL(audioBlob);
-        currentAudio = new Audio(audioUrl);
-        currentAudio.onended = () => { btnElement.classList.remove('playing'); currentAudio = null; URL.revokeObjectURL(audioUrl); };
-        currentAudio.onerror = () => { btnElement.classList.remove('playing'); currentAudio = null; URL.revokeObjectURL(audioUrl); };
-        await currentAudio.play();
+        window._ttsAudio = new Audio(audioUrl);
+        window._ttsAudio.onended = () => { btnElement.classList.remove('playing'); window._ttsAudio = null; URL.revokeObjectURL(audioUrl); };
+        window._ttsAudio.onerror = () => { btnElement.classList.remove('playing'); window._ttsAudio = null; URL.revokeObjectURL(audioUrl); };
+        await window._ttsAudio.play();
     } catch (e) {
         console.error('TTS error:', e);
         showToast(`TTS Error: ${e.message}`, 'error');
@@ -714,7 +1027,221 @@ async function playTTSHTTP(text, btnElement) {
     }
 }
 
-// === DECISIONS ===
+// =============================================================================
+// CHAT
+// =============================================================================
+
+function appendMessage(role, text, analysis = null) {
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    if (analysis && role === 'assistant') {
+        const bar = document.createElement('div');
+        bar.className = 'analysis-bar';
+        if (analysis.situations_detected?.length > 0) {
+            const s = document.createElement('span'); s.className = 'analysis-badge ab-info';
+            s.textContent = `📍 Situations: ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
+        }
+        if (analysis.has_forbidden) {
+            const a = document.createElement('span'); a.className = 'analysis-badge ab-danger';
+            a.textContent = '🛡️ FORBIDDEN'; bar.appendChild(a);
+        } else if (analysis.has_conditional) {
+            const a = document.createElement('span'); a.className = 'analysis-badge ab-warn';
+            a.textContent = '🛡️ Conditional'; bar.appendChild(a);
+        } else {
+            const a = document.createElement('span'); a.className = 'analysis-badge ab-ok';
+            a.textContent = '🛡️ Cleared'; bar.appendChild(a);
+        }
+        if (analysis.decisions_retrieved > 0) {
+            const d = document.createElement('span'); d.className = 'analysis-badge ab-ok';
+            d.textContent = `📚 ${analysis.decisions_retrieved} decision patterns`; bar.appendChild(d);
+        }
+        if (analysis.behaviors_applied > 0) {
+            const b = document.createElement('span'); b.className = 'analysis-badge ab-ok';
+            b.textContent = `🎭 ${analysis.behaviors_applied} persona styles`; bar.appendChild(b);
+        }
+        div.appendChild(bar);
+        if (analysis.suggest_flag) {
+            const banner = document.createElement('div');
+            banner.className = 'flag-banner';
+            banner.innerHTML = `<span>⚠️ This response may need audit review. Confidence is low or authority is conditional.</span><button onclick="manualFlag()">Flag for Audit</button>`;
+            div.appendChild(banner);
+        }
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    if (role === 'assistant') {
+        bubble.innerHTML = formatText(escapeHtml(text));
+        const ttsBtn = document.createElement('button');
+        ttsBtn.className = 'tts-btn';
+        ttsBtn.title = 'Read aloud via voice engine';
+        ttsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+        ttsBtn.onclick = () => playTTS(text, ttsBtn);
+        bubble.appendChild(ttsBtn);
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'copy-btn';
+        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+        copyBtn.title = 'Copy response to clipboard';
+        copyBtn.onclick = () => { navigator.clipboard.writeText(text); showToast('Copied to clipboard'); };
+        bubble.appendChild(copyBtn);
+    } else {
+        bubble.textContent = text;
+    }
+    div.appendChild(bubble);
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function showTyping() {
+    const div = document.createElement('div');
+    div.className = 'message assistant typing';
+    div.id = 'typingIndicator';
+    div.innerHTML = '<div class="bubble"><span></span><span></span><span></span></div>';
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function hideTyping() {
+    const el = document.getElementById('typingIndicator');
+    if (el) el.remove();
+}
+
+async function sendMessage() {
+    const text = userInput.value.trim();
+    if (!text) return;
+    lastQuestion = text;
+    appendMessage('user', text);
+    userInput.value = ''; userInput.style.height = 'auto';
+    sendBtn.disabled = true; showTyping();
+    
+    try {
+        const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text, session_id: sessionId, use_kb: useKb.checked })
+        });
+        const data = await res.json();
+        hideTyping();
+        
+        if (data.error) {
+            appendMessage('assistant', 'Error: ' + data.error);
+        } else {
+            lastAiResponse = data.reply;
+            appendMessage('assistant', data.reply, data);
+            // NEW: Render thoughts panel
+            if (data.thoughts) {
+                renderThoughts(data.thoughts);
+            }
+        }
+    } catch (e) {
+        hideTyping();
+        appendMessage('assistant', 'Network error...');
+    } finally {
+        sendBtn.disabled = false; userInput.focus();
+    }
+}
+
+function renderThoughts(thoughts) {
+    const container = document.getElementById('thoughtsBody');
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    
+    // Determine confidence styling
+    const score = thoughts.confidence_score || 75;
+    const confClass = score >= 80 ? 'high' : score >= 50 ? 'med' : 'low';
+    const confFill = score >= 80 ? 'fill-high' : score >= 50 ? 'fill-med' : 'fill-low';
+    const confColor = score >= 80 ? 'conf-high' : score >= 50 ? 'conf-med' : 'conf-low';
+    
+    // Authority status
+    let authHtml = '';
+    if (thoughts.has_forbidden) {
+        authHtml = `<div class="auth-status auth-forbidden">🛡️ FORBIDDEN — Autonomous action blocked</div>`;
+    } else if (thoughts.has_conditional) {
+        authHtml = `<div class="auth-status auth-conditional">🛡️ Conditional Authority — ${thoughts.authority_violations.length} rule(s) matched</div>`;
+    } else {
+        authHtml = `<div class="auth-status auth-cleared">🛡️ Authority Cleared — No violations</div>`;
+    }
+    
+    // Situation tags
+    const tagsHtml = (thoughts.situations_detected || []).map(s => {
+        const cls = s.includes('hostile') || s.includes('forbidden') ? 'tag-danger' : 
+                    s.includes('risk') || s.includes('boundary') ? 'tag-warn' : 'tag-info';
+        return `<span class="sit-tag ${cls}">${s}</span>`;
+    }).join('');
+    
+    // References
+    const refsHtml = (thoughts.references || []).map(ref => {
+        const icons = { decision: '📊', authority: '🛡️', behavior: '🎭' };
+        return `
+        <div class="ref-item" onclick="highlightRef('${ref.id}')">
+            <span class="ref-icon">${icons[ref.type] || '📄'}</span>
+            <span class="ref-id">${ref.id}</span>
+            <span class="ref-title">${escapeHtml(ref.title)}</span>
+            <span class="ref-score">${ref.score.toFixed(2)}</span>
+        </div>`;
+    }).join('');
+    
+    const card = document.createElement('div');
+    card.className = 'thought-card active';
+    card.innerHTML = `
+        <div class="thought-header">
+            <span class="thought-title">Governance Analysis</span>
+            <span class="thought-time">${time}</span>
+        </div>
+        ${tagsHtml ? `<div class="situation-tags">${tagsHtml}</div>` : ''}
+        ${authHtml}
+        <div class="confidence-row">
+            <span class="confidence-label">Confidence</span>
+            <div class="confidence-bar-bg">
+                <div class="confidence-bar-fill ${confFill}" style="width: ${score}%"></div>
+            </div>
+            <span class="confidence-value ${confColor}">${score}%</span>
+        </div>
+        <div class="thought-content">${escapeHtml(thoughts.reasoning_trace)}</div>
+        <div class="refs-section">
+            <div class="refs-label">📚 Knowledge Base References</div>
+            <div class="refs-list">${refsHtml || '<span class="ref-item">No references retrieved</span>'}</div>
+        </div>
+    `;
+    
+    // Remove empty state if present
+    const empty = container.querySelector('.empty-thoughts');
+    if (empty) empty.remove();
+    
+    // Remove 'active' from previous cards
+    container.querySelectorAll('.thought-card').forEach(c => c.classList.remove('active'));
+    
+    container.prepend(card); // Newest first
+}
+
+function quickAsk(text) {
+    userInput.value = text;
+    userInput.style.height = 'auto';
+    userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+    userInput.focus();
+}
+
+async function clearChat() {
+    try {
+        await fetch('/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }) });
+    } catch (error) { console.warn('Failed to clear session on server:', error); }
+    chatBox.innerHTML = `
+        <div class="message assistant welcome">
+            <div class="bubble">
+                <div class="bubble-title">Welcome to DTOS</div>
+                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
+                <div class="quick-pills">
+                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
+                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
+                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
+                </div>
+            </div>
+        </div>`;
+    lastQuestion = ''; lastAiResponse = ''; lastContext = '';
+}
+
+// =============================================================================
+// DECISIONS
+// =============================================================================
+
 async function loadDecisions(category = '') {
     try {
         decisionsList.innerHTML = renderSkeleton(3);
@@ -798,7 +1325,10 @@ async function addDecision() {
 async function toggleDecision(id) { await fetch(`/api/decisions/${id}/toggle`, { method: 'POST' }); loadDecisions(decFilter.value); }
 async function deleteDecision(id) { if (!confirm('Delete this governance decision pattern?')) return; await fetch(`/api/decisions/${id}`, { method: 'DELETE' }); loadDecisions(decFilter.value); loadStats(); }
 
-// === BEHAVIORS ===
+// =============================================================================
+// BEHAVIORS
+// =============================================================================
+
 async function loadBehaviors() {
     try {
         behaviorsList.innerHTML = renderSkeleton(3);
@@ -871,7 +1401,10 @@ async function addBehavior() {
 async function toggleBehavior(id) { await fetch(`/api/behaviors/${id}/toggle`, { method: 'POST' }); loadBehaviors(); }
 async function deleteBehavior(id) { if (!confirm('Delete this persona behavior?')) return; await fetch(`/api/behaviors/${id}`, { method: 'DELETE' }); loadBehaviors(); loadStats(); }
 
-// === AUTHORITY ===
+// =============================================================================
+// AUTHORITY
+// =============================================================================
+
 async function loadAuthority() {
     try {
         authorityList.innerHTML = renderSkeleton(3);
@@ -943,7 +1476,10 @@ async function addAuthority() {
 async function toggleAuthority(id) { await fetch(`/api/authority/${id}/toggle`, { method: 'POST' }); loadAuthority(); }
 async function deleteAuthority(id) { if (!confirm('Delete this authority and safety rule?')) return; await fetch(`/api/authority/${id}`, { method: 'DELETE' }); loadAuthority(); loadStats(); }
 
-// === REVIEW / FLAGS ===
+// =============================================================================
+// REVIEW / FLAGS
+// =============================================================================
+
 async function loadFlags() {
     try {
         flagsList.innerHTML = renderSkeleton(2);
@@ -1084,136 +1620,10 @@ async function manualFlag() {
     } catch (e) { showToast('Failed to flag for audit', 'error'); }
 }
 
-// === CHAT ===
-function appendMessage(role, text, analysis = null) {
-    const div = document.createElement('div');
-    div.className = `message ${role}`;
-    if (analysis && role === 'assistant') {
-        const bar = document.createElement('div');
-        bar.className = 'analysis-bar';
-        if (analysis.situations_detected?.length > 0) {
-            const s = document.createElement('span'); s.className = 'analysis-badge ab-info';
-            s.textContent = `📍 Situations: ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
-        }
-        if (analysis.has_forbidden) {
-            const a = document.createElement('span'); a.className = 'analysis-badge ab-danger';
-            a.textContent = '🛡️ FORBIDDEN'; bar.appendChild(a);
-        } else if (analysis.has_conditional) {
-            const a = document.createElement('span'); a.className = 'analysis-badge ab-warn';
-            a.textContent = '🛡️ Conditional'; bar.appendChild(a);
-        } else {
-            const a = document.createElement('span'); a.className = 'analysis-badge ab-ok';
-            a.textContent = '🛡️ Cleared'; bar.appendChild(a);
-        }
-        if (analysis.decisions_retrieved > 0) {
-            const d = document.createElement('span'); d.className = 'analysis-badge ab-ok';
-            d.textContent = `📚 ${analysis.decisions_retrieved} decision patterns`; bar.appendChild(d);
-        }
-        if (analysis.behaviors_applied > 0) {
-            const b = document.createElement('span'); b.className = 'analysis-badge ab-ok';
-            b.textContent = `🎭 ${analysis.behaviors_applied} persona styles`; bar.appendChild(b);
-        }
-        div.appendChild(bar);
-        if (analysis.suggest_flag) {
-            const banner = document.createElement('div');
-            banner.className = 'flag-banner';
-            banner.innerHTML = `<span>⚠️ This response may need audit review. Confidence is low or authority is conditional.</span><button onclick="manualFlag()">Flag for Audit</button>`;
-            div.appendChild(banner);
-        }
-    }
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    if (role === 'assistant') {
-        bubble.innerHTML = formatText(escapeHtml(text));
-        const ttsBtn = document.createElement('button');
-        ttsBtn.className = 'tts-btn';
-        ttsBtn.title = 'Read aloud via voice engine';
-        ttsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
-        ttsBtn.onclick = () => playTTS(text, ttsBtn);
-        bubble.appendChild(ttsBtn);
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'copy-btn';
-        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-        copyBtn.title = 'Copy response to clipboard';
-        copyBtn.onclick = () => { navigator.clipboard.writeText(text); showToast('Copied to clipboard'); };
-        bubble.appendChild(copyBtn);
-    } else {
-        bubble.textContent = text;
-    }
-    div.appendChild(bubble);
-    chatBox.appendChild(div);
-    chatBox.scrollTop = chatBox.scrollHeight;
-}
+// =============================================================================
+// UTILS
+// =============================================================================
 
-function showTyping() {
-    const div = document.createElement('div');
-    div.className = 'message assistant typing';
-    div.id = 'typingIndicator';
-    div.innerHTML = '<div class="bubble"><span></span><span></span><span></span></div>';
-    chatBox.appendChild(div);
-    chatBox.scrollTop = chatBox.scrollHeight;
-}
-
-function hideTyping() {
-    const el = document.getElementById('typingIndicator');
-    if (el) el.remove();
-}
-
-async function sendMessage() {
-    const text = userInput.value.trim();
-    if (!text) return;
-    lastQuestion = text; lastContext = ''; lastAiResponse = '';
-    appendMessage('user', text);
-    userInput.value = ''; userInput.style.height = 'auto';
-    sendBtn.disabled = true; showTyping();
-    try {
-        const res = await fetch('/api/chat', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, session_id: sessionId, use_kb: useKb.checked })
-        });
-        const data = await res.json();
-        hideTyping();
-        if (data.error) { appendMessage('assistant', 'Error: ' + data.error); }
-        else {
-            lastAiResponse = data.reply;
-            appendMessage('assistant', data.reply, data);
-            if (data.suggest_flag) {
-                lastContext = `Situations: ${data.situations_detected?.join(', ') || 'none'}. Authority: ${data.authority_violations} checks.`;
-            }
-        }
-    } catch (e) {
-        hideTyping();
-        appendMessage('assistant', 'Network error. Connection to the reasoning engine lost. Please try again. Incident logged.');
-    } finally { sendBtn.disabled = false; userInput.focus(); }
-}
-
-function quickAsk(text) {
-    userInput.value = text;
-    userInput.style.height = 'auto';
-    userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
-    userInput.focus();
-}
-
-async function clearChat() {
-    try {
-        await fetch('/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }) });
-    } catch (error) { console.warn('Failed to clear session on server:', error); }
-    chatBox.innerHTML = `
-        <div class="message assistant welcome">
-            <div class="bubble">
-                <div class="bubble-title">Welcome to DTOS</div>
-                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
-                <div class="quick-pills">
-                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
-                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
-                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
-                </div>
-            </div>
-        </div>`;
-    lastQuestion = ''; lastAiResponse = ''; lastContext = '';
-}
-
-// === UTILS ===
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;

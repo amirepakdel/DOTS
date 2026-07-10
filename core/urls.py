@@ -11,6 +11,7 @@ router.register(r'flags', views.FlagViewSet, basename='flags')
 urlpatterns = [
     path('', views.IndexView.as_view(), name='index'),
     path('health', views.HealthView.as_view(), name='health'),
+    path('api/chat/stream', views.ChatStreamView.as_view(), name='chat-stream'),
     path('api/config', views.ConfigView.as_view(), name='config'),
     path('api/chat', views.ChatView.as_view(), name='chat'),
     path('api/history', views.HistoryView.as_view(), name='history'),

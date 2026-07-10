@@ -34,6 +34,7 @@ def raw_pcm_to_wav(raw_pcm_bytes, sample_rate=24000, channels=1, sample_width=2)
 class CartesiaSTTConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer proxying browser audio -> Cartesia STT WebSocket.
+    Supports continuous streaming for real-time voice calls.
     """
 
     CARTESIA_WS_URL = "wss://api.cartesia.ai/stt/websocket"
@@ -42,6 +43,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
         self.cartesia_ws = None
         self.transcript_parts = []
         self.connected = False
+        self.config = None
         await self.accept()
 
     async def disconnect(self, close_code):
@@ -53,6 +55,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
         self.connected = False
 
     async def receive(self, text_data=None, bytes_data=None):
+        # --- Step 1: Config / Connection ---
         if not self.connected and text_data:
             try:
                 config = json.loads(text_data)
@@ -69,14 +72,14 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
             })
             return
 
+        # --- Step 2: Handle client messages ---
         try:
             if bytes_data:
+                # FIX: Forward raw PCM bytes directly as binary frames
                 await self.cartesia_ws.send(bytes_data)
             elif text_data:
-                if text_data in ("finalize", "close"):
+                if text_data in ("finalize", "close", "done"):
                     await self.cartesia_ws.send(text_data)
-                    if text_data == "finalize":
-                        await self.cartesia_ws.send("done")   
                 else:
                     try:
                         json.loads(text_data)
@@ -117,6 +120,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
         try:
             self.cartesia_ws = await websockets.connect(url, additional_headers=extra_headers)
             self.connected = True
+            self.config = config
             await self.send_json({
                 "type": "ready",
                 "message": "Connected to Cartesia STT. Start sending audio chunks."
@@ -129,60 +133,56 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
 
     async def _relay_cartesia_to_client(self):
         """
-        Relay audio from Cartesia back to the browser.
-        Buffers audio per context_id and sends complete sentence audio
-        only when Cartesia signals 'done'.
+        Relay transcripts from Cartesia back to the browser in real-time.
+        For continuous streaming, we forward all transcript events immediately.
         """
         try:
             async for message in self.cartesia_ws:
                 if isinstance(message, str):
                     data = json.loads(message)
                     msg_type = data.get("type")
-                    context_id = data.get("context_id")
 
-                    if msg_type == "chunk" and data.get("data"):
-                        audio_bytes = base64.b64decode(data["data"])
-                        # Accumulate in buffer instead of streaming immediately
-                        if context_id and context_id in self.active_contexts:
-                            self.active_contexts[context_id]["buffer"].extend(audio_bytes)
+                    if msg_type == "transcript":
+                        # Forward transcript immediately (both interim and final)
+                        await self.send_json({
+                            "type": "transcript",
+                            "text": data.get("text", ""),
+                            "is_final": data.get("is_final", False),
+                            "context_id": data.get("context_id")
+                        })
 
                     elif msg_type == "done":
-                        # Send complete accumulated audio for this sentence
-                        if context_id and context_id in self.active_contexts:
-                            buffer = self.active_contexts[context_id]["buffer"]
-                            if buffer:
-                                await self.send(bytes_data=bytes(buffer))
-                            del self.active_contexts[context_id]
-                        
-                        # Signal completion to frontend
                         await self.send_json({
                             "type": "done",
-                            "context_id": context_id,
+                            "context_id": data.get("context_id"),
                             "status_code": data.get("status_code")
+                        })
+
+                    elif msg_type == "flush_done":
+                        # FIX: Handle flush_done - sent after finalize completes
+                        await self.send_json({
+                            "type": "flush_done",
+                            "context_id": data.get("context_id")
                         })
 
                     elif msg_type == "timestamps":
                         await self.send_json({
                             "type": "timestamps",
-                            "context_id": context_id,
+                            "context_id": data.get("context_id"),
                             "word_timestamps": data.get("word_timestamps")
                         })
 
                     elif msg_type == "error":
                         await self.send_json({
                             "type": "error",
-                            "context_id": context_id,
+                            "context_id": data.get("context_id"),
                             "error": data.get("message", "Unknown Cartesia error")
                         })
-
-                else:
-                    # Rare: binary frame from Cartesia
-                    pass
 
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception as e:
-            logger.error(f"TTS relay task error: {e}")
+            logger.error(f"STT relay task error: {e}")
         finally:
             await self.send_json({"type": "connection_closed"})
 
@@ -193,7 +193,7 @@ class CartesiaSTTConsumer(AsyncWebsocketConsumer):
 class CartesiaTTSConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer proxying browser text -> Cartesia TTS WebSocket.
-    Supports streaming text chunks for ultra-low latency.
+    FIXED: Streams audio chunks immediately for real-time playback.
     """
 
     CARTESIA_WS_URL = "wss://api.cartesia.ai/tts/websocket"
@@ -202,7 +202,6 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
         self.cartesia_ws = None
         self.connected = False
         self.relay_task = None
-        # Track active contexts so we can stream multiple utterances
         self.active_contexts = {}
         await self.accept()
 
@@ -237,12 +236,9 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
         # --- Step 2: Handle client messages ---
         try:
             data = json.loads(text_data) if text_data else {}
-
             msg_type = data.get("type")
 
-            # ═══════════════════════════════════════
             # MODE A: Single-shot (backward compatible)
-            # ═══════════════════════════════════════
             if msg_type == "generate" or "transcript" in data:
                 context_id = data.get("context_id", str(uuid.uuid4()))
                 request = {
@@ -269,21 +265,19 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                 await self.cartesia_ws.send(json.dumps(request))
                 return
 
-            # ═══════════════════════════════════════
             # MODE B: Streaming chunks (THE FAST WAY)
-            # ═══════════════════════════════════════
             if msg_type == "chunk":
                 context_id = data.get("context_id")
                 if not context_id:
-                    await self.send_json({
-                        "type": "error",
-                        "error": "context_id is required for streaming chunks"
-                    })
+                    await self.send_json({"type": "error", "error": "context_id required"})
                     return
 
-                text_chunk = data.get("text", "")
-                is_continue = data.get("continue", True)  # default true for streaming
-                is_final = not is_continue
+                text_chunk = data.get("text", "").strip()
+                if not text_chunk:
+                    await self.send_json({"type": "chunk_ack", "context_id": context_id, "chars_sent": 0})
+                    return
+
+                is_continue = data.get("continue", True)
 
                 request = {
                     "model_id": data.get("model_id", "sonic-3.5"),
@@ -302,23 +296,19 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                     "continue": is_continue,
                     "add_timestamps": data.get("add_timestamps", False)
                 }
-                speed = data.get("speed")
-                if speed is not None:
+
+                if speed := data.get("speed"):
                     request["generation_config"] = {"speed": float(speed)}
 
-                # Optional: tune buffer delay for low latency
-                # Lower = faster audio start, but higher risk of cutoffs
-                max_buffer = data.get("max_buffer_delay_ms")
-                if max_buffer is not None:
+                if max_buffer := data.get("max_buffer_delay_ms"):
                     request["max_buffer_delay_ms"] = int(max_buffer)
 
                 await self.cartesia_ws.send(json.dumps(request))
 
-                # Track active context
-                self.active_contexts[context_id] = {
-                    "finalized": is_final,
-                    "buffer": bytearray()
-                }
+                # Track state
+                if context_id not in self.active_contexts:
+                    self.active_contexts[context_id] = {"finalized": False, "buffer": bytearray()}
+                self.active_contexts[context_id]["finalized"] = not is_continue
 
                 await self.send_json({
                     "type": "chunk_ack",
@@ -328,13 +318,10 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                 })
                 return
 
-            # ═══════════════════════════════════════
             # MODE C: Flush / finalize a context
-            # ═══════════════════════════════════════
             if msg_type == "finalize":
                 context_id = data.get("context_id")
                 if context_id and context_id in self.active_contexts:
-                    # Send empty transcript with continue=false to flush
                     await self.cartesia_ws.send(json.dumps({
                         "model_id": data.get("model_id", "sonic-3.5"),
                         "transcript": "",
@@ -355,9 +342,7 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                     self.active_contexts[context_id]["finalized"] = True
                 return
 
-            # ═══════════════════════════════════════
             # MODE D: Cancel ongoing generation
-            # ═══════════════════════════════════════
             if msg_type == "cancel":
                 context_id = data.get("context_id")
                 if context_id:
@@ -367,9 +352,7 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                     }))
                 return
 
-            # ═══════════════════════════════════════
             # MODE E: Close connection
-            # ═══════════════════════════════════════
             if msg_type == "close":
                 await self.close()
                 return
@@ -413,26 +396,27 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
 
     async def _relay_cartesia_to_client(self):
         """
-        Relay audio + metadata from Cartesia back to the browser in real time.
+        FIXED: Stream audio + metadata from Cartesia back immediately.
+        No buffering — sends each chunk as it arrives for real-time playback.
         """
         try:
             async for message in self.cartesia_ws:
                 if isinstance(message, str):
                     data = json.loads(message)
                     msg_type = data.get("type")
+                    context_id = data.get("context_id")
 
                     if msg_type == "chunk" and data.get("data"):
                         audio_bytes = base64.b64decode(data["data"])
-                        context_id = data.get("context_id")
 
-                        # Optionally accumulate per-context for later download
+                        # Accumulate for potential download
                         if context_id and context_id in self.active_contexts:
                             self.active_contexts[context_id]["buffer"].extend(audio_bytes)
 
                         # ── STREAM AUDIO IMMEDIATELY ──
                         await self.send(bytes_data=audio_bytes)
 
-                        # Send metadata so the client knows progress
+                        # Send metadata
                         await self.send_json({
                             "type": "chunk",
                             "context_id": context_id,
@@ -440,24 +424,31 @@ class CartesiaTTSConsumer(AsyncWebsocketConsumer):
                             "audio_bytes": len(audio_bytes)
                         })
 
+                    elif msg_type == "flush_done":
+                        # FIX: Forward flush_done so client knows context is complete
+                        await self.send_json({
+                            "type": "flush_done",
+                            "context_id": context_id
+                        })
+
                     elif msg_type == "timestamps":
                         await self.send_json({
                             "type": "timestamps",
-                            "context_id": data.get("context_id"),
+                            "context_id": context_id,
                             "word_timestamps": data.get("word_timestamps")
                         })
 
                     elif msg_type == "done":
                         await self.send_json({
                             "type": "done",
-                            "context_id": data.get("context_id"),
+                            "context_id": context_id,
                             "status_code": data.get("status_code")
                         })
 
                     elif msg_type == "error":
                         await self.send_json({
                             "type": "error",
-                            "context_id": data.get("context_id"),
+                            "context_id": context_id,
                             "error": data.get("message", "Unknown Cartesia error")
                         })
 

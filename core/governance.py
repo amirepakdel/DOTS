@@ -184,13 +184,12 @@ def get_relevant_behaviors(situations):
                 break
     return matched[:2]
 
-def build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors, authority_docs=None):
+def build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors, authority_docs=None, include_reasoning_in_output=True):
     authority_docs = authority_docs or []
-    
+
     system = f"""You are {config.get('company_name', 'DTOS')}'s Digital Twin Operating System.
 Your job is to participate in meetings as a regulated autonomous operator, provide evidence-grounded advisory responses, and enforce governance boundaries.
 You must follow ALL authority rules. You must apply appropriate behavior styles.
-You must show your reasoning with specific numbers.
 If you lack critical information, ask clarifying questions instead of guessing.
 """
     personality = config.get('personality', 'analytical, direct')
@@ -236,6 +235,23 @@ If you lack critical information, ask clarifying questions instead of guessing.
             prefix = "User" if m['role'] == 'user' else "Assistant"
             history_text += f"{prefix}: {m['content']}\n"
 
+    # Build reasoning instruction based on flag
+    if include_reasoning_in_output:
+        reasoning_instruction = "\n4. Show step-by-step reasoning with evidence sources and confidence levels."
+        output_format = ""
+    else:
+        reasoning_instruction = ""
+        output_format = """
+
+CRITICAL OUTPUT FORMAT — YOU MUST FOLLOW THIS EXACTLY:
+- Respond in plain, natural conversational prose only.
+- NEVER use structured headers like "Recommendation:", "Reasoning:", "Analysis:", "Confidence:", "Step-by-step:", "Final Answer:", or similar.
+- NEVER output labels like "PROCEED", "REJECT", "ESCALATE", "DELAY", "NEGOTIATE", or "NEED MORE INFO" as standalone lines or headers.
+- If you need more information, simply ask follow-up questions naturally — do NOT label it as "NEED MORE INFO".
+- If a request is forbidden, simply refuse politely and explain why — do NOT use "REJECT" or "FORBIDDEN" labels.
+- Your response should read like a human assistant speaking directly to the user, with no meta-commentary about your internal process.
+- The user will see your governance analysis separately; do NOT mention it in your response."""
+
     full_prompt = f"""{system}
 
 {history_text}
@@ -246,9 +262,8 @@ INSTRUCTIONS:
 1. Check if this violates any authority rules (keyword or semantic). If yes, REFUSE and explain fallback.
 2. Detect the situation type and apply matching persona behavior style (tone, do/don't).
 3. Use relevant decision patterns as precedent.
-4. Show step-by-step reasoning with evidence sources and confidence levels.
-5. State your final recommendation clearly (PROCEED / REJECT / ESCALATE / DELAY / NEGOTIATE / NEED MORE INFO).
-6. If you need more information to answer accurately, ask specific questions. Do not guess.
+4. State your final recommendation clearly (PROCEED / REJECT / ESCALATE / DELAY / NEGOTIATE / NEED MORE INFO).
+5. If you need more information to answer accurately, ask specific questions. Do not guess.{reasoning_instruction}{output_format}
 
 Your Response:"""
     return full_prompt

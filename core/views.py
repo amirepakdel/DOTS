@@ -10,7 +10,7 @@ import time
 import struct
 import io
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -255,6 +255,61 @@ class FlagViewSet(viewsets.ModelViewSet):
 
 
 class ChatView(APIView):
+    """Standard non-streaming chat endpoint."""
+    def _calculate_confidence(self, violations, decisions, behaviors):
+        """Calculate a 0-100 confidence score based on match quality."""
+        score = 75  # base confidence
+        if any(v['allowed'] == 'no' for v in violations):
+            score = 95  # High confidence when refusing (clear rule)
+        elif any(v['allowed'] == 'conditional' for v in violations):
+            score = 65  # Lower when conditional
+        if len(decisions) > 0:
+            score += min(len(decisions) * 5, 15)  # +5 per relevant decision, max +15
+        if len(behaviors) > 0:
+            score += min(len(behaviors) * 3, 6)   # +3 per behavior, max +6
+        return min(score, 100)
+
+    def _build_reasoning_trace(self, situations, violations, decisions, behaviors):
+        """Build a human-readable reasoning summary."""
+        trace_parts = []
+        if situations:
+            trace_parts.append(f"Detected situations: {', '.join(situations)}.")
+        if violations:
+            v = violations[0]
+            trace_parts.append(f"Authority check: '{v['rule']}' — allowed: {v['allowed']}.")
+        if decisions:
+            trace_parts.append(f"Retrieved {len(decisions)} relevant decision patterns from knowledge base.")
+        if behaviors:
+            trace_parts.append(f"Applied {len(behaviors)} persona behavior styles.")
+        return " ".join(trace_parts) or "No specific governance triggers detected."
+
+    def _build_references(self, decisions, behaviors, violations):
+        """Build reference list with IDs, titles, and similarity scores."""
+        refs = []
+        for d in decisions:
+            refs.append({
+                "id": f"dec-{d.metadata.get('id', 'unknown')}",
+                "type": "decision",
+                "title": d.page_content[:60] + "..." if len(d.page_content) > 60 else d.page_content,
+                "score": 0.85  # You could compute actual cosine similarity here
+            })
+        # Add authority rules as references too
+        for v in violations:
+            refs.append({
+                "id": f"auth-{v['id']}",
+                "type": "authority",
+                "title": v['rule'],
+                "score": 0.94
+            })
+        for b in behaviors:
+            refs.append({
+                "id": f"beh-{b['id']}",
+                "type": "behavior", 
+                "title": b['situation'][:60] + "..." if len(b['situation']) > 60 else b['situation'],
+                "score": 0.76
+            })
+        return refs
+
     def post(self, request):
         user_message = request.data.get("message", "").strip()
         session_id = request.data.get("session_id", "default")
@@ -263,6 +318,10 @@ class ChatView(APIView):
         if not user_message:
             return Response({"error": "Empty message"}, status=400)
 
+        result = self._process_chat(user_message, session_id, use_kb)
+        return Response(result)
+
+    def _process_chat(self, user_message, session_id, use_kb):
         config = get_config()
         situations = detect_situation(user_message)
         violations = check_authority(user_message)
@@ -278,7 +337,10 @@ class ChatView(APIView):
             behaviors = get_relevant_behaviors(situations)
 
         history = get_history(session_id, limit=int(config.get('max_history', 10)))
-        full_prompt = build_master_prompt(user_message, config, history, situations, violations, decisions, behaviors)
+        full_prompt = build_master_prompt(
+            user_message, config, history, situations, violations, decisions, behaviors,
+            include_reasoning_in_output=False
+        )
 
         reply = ""
         model_used = "unknown"
@@ -332,7 +394,7 @@ class ChatView(APIView):
                 suggest_flag = True
                 flag_reason = "uncertain_answer"
 
-        return Response({
+        return {
             "reply": reply,
             "session_id": session_id,
             "model": model_used,
@@ -344,8 +406,117 @@ class ChatView(APIView):
             "has_forbidden": has_forbidden,
             "has_conditional": has_conditional,
             "suggest_flag": suggest_flag,
-            "flag_reason": flag_reason
-        })
+            "flag_reason": flag_reason,
+            "thoughts": {
+                "situations_detected": situations,
+                "authority_violations": violations,
+                "has_forbidden": has_forbidden,
+                "has_conditional": has_conditional,
+                "confidence_score": self._calculate_confidence(violations, decisions, behaviors),
+                "reasoning_trace": self._build_reasoning_trace(situations, violations, decisions, behaviors),
+                "references": self._build_references(decisions, behaviors, violations),
+                "model_used": model_used,
+                "timestamp": timezone.now().isoformat()
+            }
+        }
+
+
+class ChatStreamView(APIView):
+    """
+    Streaming chat endpoint for real-time voice calls.
+    Returns Server-Sent Events (SSE) with text chunks as they are generated.
+    """
+
+    def post(self, request):
+        user_message = request.data.get("message", "").strip()
+        session_id = request.data.get("session_id", "default")
+        use_kb = request.data.get("use_kb", True)
+
+        if not user_message:
+            return Response({"error": "Empty message"}, status=400)
+
+        def event_stream():
+            config = get_config()
+            situations = detect_situation(user_message)
+            violations = check_authority(user_message)
+            has_forbidden = any(v['allowed'] == 'no' for v in violations)
+
+            # Handle forbidden immediately
+            if has_forbidden:
+                fallback = violations[0].get('fallback', 'This action is not permitted.')
+                yield f"data: {json.dumps({'text': fallback, 'done': False})}\n\n"
+                yield f"data: {json.dumps({'text': '', 'done': True})}\n\n"
+                return
+
+            save_message(session_id, "user", user_message)
+
+            decisions = []
+            behaviors = []
+            if use_kb:
+                decisions = get_relevant_decisions(user_message, top_k=3)
+                behaviors = get_relevant_behaviors(situations)
+
+            history = get_history(session_id, limit=int(config.get('max_history', 10)))
+            full_prompt = build_master_prompt(
+                user_message, config, history, situations, violations, decisions, behaviors,
+                include_reasoning_in_output=False
+            )
+
+            full_reply = ""
+
+            try:
+                # Try Anthropic streaming first
+                if settings.ANTHROPIC_API_KEY:
+                    try:
+                        for chunk in llm_anthropic.stream(full_prompt):
+                            text = ""
+                            if hasattr(chunk, 'content'):
+                                if isinstance(chunk.content, list):
+                                    for block in chunk.content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            text += block.get("text", "")
+                                        elif isinstance(block, str):
+                                            text += block
+                                else:
+                                    text = str(chunk.content)
+                            else:
+                                text = str(chunk)
+
+                            if text:
+                                full_reply += text
+                                yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                    except Exception as e:
+                        logger.error(f"Anthropic stream error: {e}")
+                        # Fallback to OpenAI
+                        for chunk in llm_openai.stream(full_prompt):
+                            text = getattr(chunk, 'content', str(chunk)) or ""
+                            if text:
+                                full_reply += text
+                                yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+                else:
+                    for chunk in llm_openai.stream(full_prompt):
+                        text = getattr(chunk, 'content', str(chunk)) or ""
+                        if text:
+                            full_reply += text
+                            yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+
+            except Exception as e:
+                error_text = f"Error: {str(e)}"
+                yield f"data: {json.dumps({'text': error_text, 'done': False})}\n\n"
+
+            finally:
+                # Save complete response
+                if full_reply:
+                    save_message(session_id, "assistant", full_reply)
+                yield f"data: {json.dumps({'text': '', 'done': True})}\n\n"
+
+        response = StreamingHttpResponse(
+            event_stream(),
+            content_type='text/event-stream'
+        )
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'
+        return response
 
 
 class HistoryView(APIView):
@@ -385,7 +556,6 @@ def convert_audio_to_raw_pcm(input_path, output_path, sample_rate=16000):
     Convert any audio file to raw PCM s16le mono at target sample rate.
     Tries ffmpeg first, falls back to pydub, then pure Python.
     """
-    # Try ffmpeg first (best quality)
     import subprocess
     try:
         result = subprocess.run(
@@ -395,11 +565,10 @@ def convert_audio_to_raw_pcm(input_path, output_path, sample_rate=16000):
         if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             return True
     except FileNotFoundError:
-        pass  # ffmpeg not installed
+        pass
     except Exception as e:
         logger.warning(f"ffmpeg conversion failed: {e}")
 
-    # Fallback to pydub
     if PYDUB_AVAILABLE:
         try:
             audio = AudioSegment.from_file(input_path)
@@ -438,9 +607,6 @@ class STTView(APIView):
     Speech-to-Text via Cartesia WebSocket API.
     Accepts multipart audio file upload, converts to raw PCM s16le 16kHz mono,
     streams to Cartesia STT WebSocket, returns transcript.
-
-    WARNING: This blocks a gunicorn sync worker for the entire STT session.
-    For production, use the async WebSocket consumer (CartesiaSTTConsumer) instead.
     """
 
     def post(self, request):
@@ -475,7 +641,6 @@ class STTView(APIView):
             with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as tmp_out:
                 tmp_out_path = tmp_out.name
 
-            # Convert to raw PCM
             success = convert_audio_to_raw_pcm(tmp_in_path, tmp_out_path, sample_rate=16000)
             if not success:
                 return Response({
@@ -528,7 +693,10 @@ class STTView(APIView):
                 if msg_type == "transcript" and data.get("is_final"):
                     transcripts.append(data.get("text", ""))
                     logger.debug(f"[STT] Final transcript chunk: {data.get('text', '')}")
-                elif msg_type in ("done", "flush_done"):
+                elif msg_type == "flush_done":
+                    logger.info("[STT] Received 'flush_done' from Cartesia")
+                    done_event.set()
+                elif msg_type == "done":
                     logger.info("[STT] Received 'done' from Cartesia")
                     done_event.set()
                 elif msg_type == "error":
@@ -538,22 +706,16 @@ class STTView(APIView):
 
         def on_error(ws, error):
             err_str = str(error)
-            # Ignore normal close frames and errors after we're already done
             if "Close message" in err_str or "close" in err_str.lower():
                 if done_event.is_set():
-                    logger.debug(f"[STT] Ignoring close-frame error after done: {err_str}")
                     return
-                # If not done, treat as signal to finish
-                logger.warning(f"[STT] Connection closed unexpectedly: {err_str}")
                 done_event.set()
                 return
             if not done_event.is_set():
                 error_msg[0] = err_str
-                logger.error(f"[STT] WebSocket error: {err_str}")
                 done_event.set()
 
         def on_close(ws, close_status_code, close_msg):
-            logger.info(f"[STT] WebSocket closed: code={close_status_code}, msg={close_msg}")
             done_event.set()
 
         ws = websocket.WebSocketApp(
@@ -572,7 +734,6 @@ class STTView(APIView):
         ws_thread.daemon = True
         ws_thread.start()
 
-        # Wait for connection with timeout
         start = time.time()
         while not connected[0]:
             if time.time() - start > 10:
@@ -582,31 +743,25 @@ class STTView(APIView):
             time.sleep(0.05)
 
         try:
-            # Stream audio chunks faster (larger chunks, less sleep)
-            chunk_size = 6400  # doubled from 3200
+            chunk_size = 6400
             total_chunks = len(raw_audio) // chunk_size + (1 if len(raw_audio) % chunk_size else 0)
             logger.info(f"[STT] Streaming {total_chunks} chunks ({len(raw_audio)} bytes)")
 
             for i in range(0, len(raw_audio), chunk_size):
                 if not ws.sock or not ws.sock.connected:
-                    logger.warning("[STT] WebSocket disconnected during streaming")
                     break
                 ws.send(raw_audio[i:i + chunk_size], opcode=websocket.ABNF.OPCODE_BINARY)
-                # Adaptive sleep: shorter for more chunks
                 time.sleep(0.01)
 
             if ws.sock and ws.sock.connected:
-                logger.info("[STT] Sending finalize")
                 ws.send("finalize")
                 ws.send("done")
 
-            # Wait longer for transcription — must be < gunicorn timeout
-            wait_timeout = 55  # seconds; keep this < gunicorn timeout
+            wait_timeout = 55
             logger.info(f"[STT] Waiting for transcription (timeout={wait_timeout}s)")
             done_event.wait(timeout=wait_timeout)
 
             if not done_event.is_set():
-                logger.warning("[STT] Timeout waiting for 'done', sending close")
                 ws.send("close")
                 done_event.wait(timeout=5)
         finally:
@@ -628,9 +783,7 @@ class STTView(APIView):
 class TTSView(APIView):
     """
     Text-to-Speech via Cartesia WebSocket API.
-
-    IMPORTANT: Cartesia TTS WebSocket only supports 'raw' container.
-    We request raw PCM s16le 24kHz, then wrap it in a WAV header for browser playback.
+    Returns WAV file for browser playback.
     """
 
     def post(self, request):
@@ -657,7 +810,6 @@ class TTSView(APIView):
             }, status=500)
 
         try:
-            # Cartesia WS TTS only supports raw PCM
             raw_audio = self._synthesize_via_websocket(
                 text=text,
                 voice_id=voice_id,
@@ -666,7 +818,6 @@ class TTSView(APIView):
                 api_key=api_key
             )
 
-            # Wrap raw PCM in WAV header for browser playback
             wav_audio = raw_pcm_to_wav(raw_audio, sample_rate=24000, channels=1, sample_width=2)
             return HttpResponse(wav_audio, content_type="audio/wav")
 
@@ -698,6 +849,8 @@ class TTSView(APIView):
                     except Exception:
                         pass
                 elif msg_type == "done":
+                    done_event.set()
+                elif msg_type == "flush_done":
                     done_event.set()
                 elif msg_type == "error":
                     error_msg[0] = data.get("message", "Unknown Cartesia error")

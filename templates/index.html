@@ -7,7 +7,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DTOS — Digital Twin Operating System</title>
     <link rel="stylesheet" href="{% static 'style.css' %}">
-<base target="_blank">
+    <base target="_blank">
 <base target="_blank">
 </head>
 <body>
@@ -52,65 +52,102 @@
         <main class="main">
             <!-- CHAT PANEL -->
             <div id="chatPanel" class="panel active">
-                <div class="panel-header">
-                    <div class="header-left">
-                        <h2>Operations Center</h2>
-                        <span class="header-hint">Describe any meeting, governance scenario, or advisory situation</span>
-                    </div>
-                    <div class="header-actions">
-                        <button id="clearBtn" class="btn-ghost" title="Clear conversation (Ctrl+L)">
-                            <span>🗑️</span> Clear
-                        </button>
-                    </div>
-                </div>
-                <div class="chat-container">
-                    <div id="chatBox" class="chat-box">
-                        <div class="message assistant welcome">
-                            <div class="bubble">
-                                <div class="bubble-title">Welcome to DTOS</div>
-                                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
-                                <div class="quick-pills">
-                                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
-                                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
-                                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
+                <div class="chat-layout">
+                    <!-- LEFT: Chat Column -->
+                    <div class="chat-main">
+                        <div class="panel-header">
+                            <div class="header-left">
+                                <h2>Operations Center</h2>
+                                <span class="header-hint">Describe any meeting, governance scenario, or advisory situation</span>
+                            </div>
+                            <div class="header-actions">
+                                <button id="clearBtn" class="btn-ghost" title="Clear conversation (Ctrl+L)">
+                                    <span>🗑️</span> Clear
+                                </button>
+                            </div>
+                        </div>
+                        <div class="chat-container">
+                            <div id="chatBox" class="chat-box">
+                                <div class="message assistant welcome">
+                                    <div class="bubble">
+                                        <div class="bubble-title">Welcome to DTOS</div>
+                                        <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
+                                        <div class="quick-pills">
+                                            <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
+                                            <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
+                                            <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-input-area">
+                                <div class="input-toolbar">
+                                    <label class="toggle-sm">
+                                        <input type="checkbox" id="useKb" checked>
+                                        <span class="toggle-track"></span>
+                                        <span>Knowledge Base</span>
+                                    </label>
+                                    <button id="flagBtn" class="btn-ghost-sm" title="Flag last question for admin review">🚩 Flag</button>
+                                </div>
+                                <div class="input-row">
+                                    <textarea id="userInput" placeholder="Describe your meeting, governance, or advisory situation..." rows="1"></textarea>
+                                    <button id="sendBtn" class="btn-primary" title="Send (Enter)">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                                    </button>
+                                </div>
+                                <div class="input-hint">Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+L</kbd> to clear</div>
+
+                                <!-- Voice Input Options -->
+                                <div class="voice-options">
+                                    <!-- Voice Message: Hold to Record (existing) -->
+                                    <div class="voice-message-bar">
+                                        <button id="voiceBtn" class="voice-btn" title="Hold to record voice message">
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                                            </svg>
+                                            <span id="voiceLabel">Hold to speak</span>
+                                        </button>
+                                        <div id="voiceWave" class="voice-wave hidden">
+                                            <span></span><span></span><span></span><span></span><span></span>
+                                        </div>
+                                        <span id="voiceStatus" class="voice-status"></span>
+                                    </div>
+
+                                    <!-- Voice Call: Real-time conversation (NEW) -->
+                                    <div class="voice-call-bar">
+                                        <button id="callBtn" class="call-btn" title="Start real-time voice call">
+                                            <span class="call-icon">📞</span>
+                                            <span id="callLabel">Voice Call</span>
+                                        </button>
+                                        <div id="callWave" class="call-wave hidden">
+                                            <span></span><span></span><span></span><span></span><span></span>
+                                            <span></span><span></span><span></span><span></span><span></span>
+                                        </div>
+                                        <span id="callStatus" class="call-status">Tap to start a real-time voice conversation</span>
+                                        <span id="callTimer" class="call-timer hidden">00:00</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <div class="chat-input-area">
-                        <div class="input-toolbar">
-                            <label class="toggle-sm">
-                                <input type="checkbox" id="useKb" checked>
-                                <span class="toggle-track"></span>
-                                <span>Knowledge Base</span>
-                            </label>
-                            <button id="flagBtn" class="btn-ghost-sm" title="Flag last question for admin review">🚩 Flag</button>
+
+                    <!-- RIGHT: Thoughts Panel -->
+                    <aside class="thoughts-panel" id="thoughtsPanel">
+                        <div class="thoughts-header">
+                            <h2><span class="brain-icon">🧠</span> Agent Thoughts</h2>
+                            <div class="subtitle">Reasoning trace, confidence scores &amp; knowledge base references</div>
                         </div>
-                        <div class="input-row">
-                            <textarea id="userInput" placeholder="Describe your meeting, governance, or advisory situation..." rows="1"></textarea>
-                            <button id="sendBtn" class="btn-primary" title="Send (Enter)">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                            </button>
-                        </div>
-                        <div class="input-hint">Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+L</kbd> to clear</div>
-                        
-                        <!-- Voice Input Bar -->
-                        <div class="voice-bar">
-                            <button id="voiceBtn" class="voice-btn" title="Hold to record voice message">
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                                    <line x1="12" y1="19" x2="12" y2="23"></line>
-                                    <line x1="8" y1="23" x2="16" y2="23"></line>
-                                </svg>
-                                <span id="voiceLabel">Hold to speak</span>
-                            </button>
-                            <div id="voiceWave" class="voice-wave hidden">
-                                <span></span><span></span><span></span><span></span><span></span>
+                        <div class="thoughts-body" id="thoughtsBody">
+                            <div class="empty-thoughts">
+                                <div class="empty-icon">🧠</div>
+                                <div class="empty-title">No thoughts yet</div>
+                                <div class="empty-desc">Agent reasoning, confidence scores and knowledge base references will appear here once you start a conversation.</div>
                             </div>
-                            <span id="voiceStatus" class="voice-status"></span>
                         </div>
-                    </div>
+                    </aside>
                 </div>
             </div>
 
@@ -190,7 +227,7 @@
                                 <option value="false">No</option>
                             </select>
                         </div>
-                        
+
                         <h3 style="margin-top:24px">🔊 Voice Engine (Cartesia)</h3>
                         <div class="form-group">
                             <label>Cartesia Voice ID</label>
@@ -211,7 +248,38 @@
                                 <input type="number" id="cfgVoiceSpeed" value="1.0" min="0.5" max="2.0" step="0.1">
                             </div>
                         </div>
-                        
+
+                        <h3 style="margin-top:24px">📞 Voice Call Settings</h3>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label>VAD Sensitivity</label>
+                                <select id="cfgVadSensitivity">
+                                    <option value="0.01">High (faster)</option>
+                                    <option value="0.02" selected>Normal</option>
+                                    <option value="0.05">Low (less sensitive)</option>
+                                </select>
+                                <span class="field-hint">Voice Activity Detection threshold</span>
+                            </div>
+                            <div class="form-group half">
+                                <label>Silence Timeout (ms)</label>
+                                <input type="number" id="cfgSilenceTimeout" value="800" min="200" max="3000" step="100">
+                                <span class="field-hint">End turn after this silence</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Enable Barge-In</label>
+                            <select id="cfgBargeIn">
+                                <option value="true" selected>Yes — interrupt me anytime</option>
+                                <option value="false">No — wait for me to finish</option>
+                            </select>
+                            <span class="field-hint">Allow interrupting the AI while it's speaking</span>
+                        </div>
+                        <div class="form-group">
+                            <label>TTS Buffer Delay (ms)</label>
+                            <input type="number" id="cfgTtsBuffer" value="100" min="50" max="500" step="50">
+                            <span class="field-hint">Lower = faster response, higher = smoother audio</span>
+                        </div>
+
                         <button id="saveConfigBtn" class="btn-primary full">💾 Save Configuration</button>
                     </div>
 
