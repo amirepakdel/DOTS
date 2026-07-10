@@ -3,7 +3,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>DTOS — Digital Twin Operating System</title>
     <link rel="stylesheet" href="{% static 'style.css' %}">
     <base target="_blank">
@@ -58,20 +58,39 @@
         </div>
     </div>
 
+    <!-- Mobile Thoughts Bottom Sheet -->
+    <div id="mobileThoughtsSheet" class="mobile-sheet">
+        <div class="sheet-backdrop" onclick="closeMobileThoughts()"></div>
+        <div class="sheet-content">
+            <div class="sheet-handle-bar" onclick="closeMobileThoughts()"><div class="sheet-handle"></div></div>
+            <div class="sheet-header">
+                <div class="sheet-title">
+                    <span class="sheet-icon">🧠</span>
+                    <h3>Agent Thoughts</h3>
+                </div>
+                <button class="sheet-close" onclick="closeMobileThoughts()">✕</button>
+            </div>
+            <div class="sheet-body" id="mobileThoughtsBody">
+                <div class="empty-thoughts">
+                    <div class="empty-icon"><div class="brain-pulse">🧠</div></div>
+                    <div class="empty-title">Awaiting Input</div>
+                    <div class="empty-desc">Agent reasoning, confidence scores and knowledge base references will appear here once you start a conversation.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="app">
         <!-- Mobile Header -->
-        <header class="mobile-header">
-            <button class="menu-toggle" onclick="toggleSidebar()">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-            </button>
+        <!-- <header class="mobile-header">
             <div class="mobile-brand">
                 <span class="mobile-logo">🏢</span>
                 <span class="mobile-name">DTOS</span>
             </div>
-            <button class="shortcut-toggle" onclick="openShortcuts()" title="Keyboard shortcuts">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"></path></svg>
+            <button class="shortcut-toggle" onclick="openCommandPalette()" title="Search" aria-label="Open search">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             </button>
-        </header>
+        </header> -->
 
         <!-- Sidebar Navigation -->
         <nav class="sidebar" id="sidebar">
@@ -201,8 +220,13 @@
                             </div>
                             
                             <!-- Scroll to bottom -->
-                            <button id="scrollToBottom" class="scroll-bottom-btn hidden" onclick="scrollChatToBottom()">
+                            <button id="scrollToBottom" class="scroll-bottom-btn hidden" onclick="scrollChatToBottom()" aria-label="Scroll to bottom">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                            </button>
+
+                            <!-- Mobile Thoughts Toggle FAB -->
+                            <button id="mobileThoughtsBtn" class="mobile-thoughts-fab" onclick="openMobileThoughts()" aria-label="View agent thoughts">
+                                <span>🧠</span>
                             </button>
 
                             <div class="chat-input-area">
@@ -221,7 +245,7 @@
                                 </div>
                                 <div class="input-row">
                                     <textarea id="userInput" placeholder="Describe your meeting, governance, or advisory situation..." rows="1"></textarea>
-                                    <button id="voiceBtn" class="voice-btn compact-btn" title="Hold to record voice message">
+                                    <button id="voiceBtn" class="voice-btn compact-btn" title="Hold to record voice message" aria-label="Hold to record voice">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
                                             <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
@@ -229,10 +253,10 @@
                                             <line x1="8" y1="23" x2="16" y2="23"></line>
                                         </svg>
                                     </button>
-                                    <button id="callBtn" class="call-btn compact-btn" title="Start real-time voice call">
+                                    <button id="callBtn" class="call-btn compact-btn" title="Start real-time voice call" aria-label="Start voice call">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
                                     </button>
-                                    <button id="sendBtn" class="btn-primary" title="Send (Enter)">
+                                    <button id="sendBtn" class="btn-primary" title="Send (Enter)" aria-label="Send message">
                                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                                     </button>
                                 </div>
@@ -243,12 +267,12 @@
                                 <div class="voice-options compact">
                                     <canvas id="voiceCanvas" class="voice-canvas hidden" width="120" height="32"></canvas>
                                     <span id="voiceStatus" class="voice-status"></span>
-                                    <span id="voiceLabel" class="voice-label hidden">Hold to speak to DTOS</span>  <!-- ADD THIS -->
+                                    <span id="voiceLabel" class="voice-label hidden">Hold to speak to DTOS</span>
                                     
                                     <canvas id="callCanvas" class="call-canvas hidden" width="120" height="32"></canvas>
                                     <span id="callTimer" class="call-timer hidden">00:00</span>
-                                    <span id="callStatus" class="call-status hidden">Tap to start a real-time voice conversation</span>  <!-- ADD THIS -->
-                                    <span id="callLabel" class="call-label hidden">Voice Call</span>  <!-- ADD THIS -->
+                                    <span id="callStatus" class="call-status hidden">Tap to start a real-time voice conversation</span>
+                                    <span id="callLabel" class="call-label hidden">Voice Call</span>
                                 </div>
                             </div>
                         </div>
@@ -262,7 +286,7 @@
                                 <h2>Agent Thoughts</h2>
                             </div>
                             <div class="subtitle">Reasoning trace, confidence scores & knowledge base references</div>
-                            <button class="thoughts-close" onclick="toggleThoughts()" title="Close panel">
+                            <button class="thoughts-close" onclick="toggleThoughts()" title="Close panel" aria-label="Close thoughts panel">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                             </button>
                         </div>
@@ -772,6 +796,27 @@
                 </div>
             </div>
         </main>
+
+        <!-- Mobile Bottom Navigation -->
+        <nav class="mobile-nav" id="mobileNav">
+            <button class="mobile-nav-item active" data-tab="chat" onclick="switchTab('chat')" aria-label="Chat">
+                <span class="mobile-nav-icon">💬</span>
+                <span class="mobile-nav-label">Chat</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="settings" onclick="switchTab('settings')" aria-label="Settings">
+                <span class="mobile-nav-icon">⚙️</span>
+                <span class="mobile-nav-label">Settings</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="teach" onclick="switchTab('teach')" aria-label="Teaching">
+                <span class="mobile-nav-icon">🎓</span>
+                <span class="mobile-nav-label">Teach</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="review" onclick="switchTab('review')" aria-label="Review">
+                <span class="mobile-nav-icon">🚩</span>
+                <span class="mobile-nav-label">Review</span>
+                <span class="mobile-nav-badge hidden" id="mobileReviewBadge">0</span>
+            </button>
+        </nav>
     </div>
 
     <script src="{% static 'script.js' %}"></script>

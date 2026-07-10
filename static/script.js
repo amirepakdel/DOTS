@@ -1,4 +1,4 @@
-// === DTOS Digital Twin Operating System - Frontend Controller v2.0 ===
+// === DTOS Digital Twin Operating System - Frontend Controller v2.1 ===
 const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
 let currentTab = 'chat';
 let currentSubTab = 'decisions';
@@ -23,6 +23,11 @@ let voiceAnimFrame = null;
 // === VOICE CALL STATE ===
 let callSession = null;
 let callAnimFrame = null;
+
+// === MOBILE STATE ===
+let touchStartX = 0;
+let touchStartY = 0;
+let isMobile = window.innerWidth <= 768;
 
 // === DOM ===
 const navItems = document.querySelectorAll('.nav-item');
@@ -182,11 +187,32 @@ function closeShortcuts() {
     document.getElementById('shortcutsModal').classList.remove('open');
 }
 
+// === MOBILE BOTTOM SHEET (THOUGHTS) ===
+function openMobileThoughts() {
+    const sheet = document.getElementById('mobileThoughtsSheet');
+    if (sheet) sheet.classList.add('open');
+}
+
+function closeMobileThoughts() {
+    const sheet = document.getElementById('mobileThoughtsSheet');
+    if (sheet) sheet.classList.remove('open');
+}
+
 // === SIDEBAR & NAVIGATION ===
 function switchTab(tab) {
     navItems.forEach(i => i.classList.toggle('active', i.dataset.tab === tab));
     panels.forEach(p => p.classList.toggle('active', p.id === tab + 'Panel'));
     currentTab = tab;
+    
+    // Sync mobile bottom nav
+    document.querySelectorAll('.mobile-nav-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.tab === tab);
+    });
+    
+    // Close sidebar on mobile after selection
+    if (window.innerWidth <= 768) {
+        document.getElementById('sidebar').classList.remove('open');
+    }
     
     // Update breadcrumb
     const bcIcon = document.querySelector('.bc-icon');
@@ -208,6 +234,7 @@ function toggleSidebar() {
 
 function toggleThoughts() {
     const panel = document.getElementById('thoughtsPanel');
+    if (!panel) return;
     isThoughtsOpen = !isThoughtsOpen;
     panel.classList.toggle('collapsed', !isThoughtsOpen);
 }
@@ -235,6 +262,39 @@ filterPills.forEach(pill => {
         loadFlags();
     });
 });
+
+// === SWIPE GESTURES ===
+function initSwipeGestures() {
+    const app = document.querySelector('.app');
+    if (!app) return;
+    
+    app.addEventListener('touchstart', (e) => {
+        touchStartX = e.changedTouches[0].screenX;
+        touchStartY = e.changedTouches[0].screenY;
+    }, { passive: true });
+    
+    app.addEventListener('touchend', (e) => {
+        const touchEndX = e.changedTouches[0].screenX;
+        const touchEndY = e.changedTouches[0].screenY;
+        const deltaX = touchEndX - touchStartX;
+        const deltaY = touchEndY - touchStartY;
+        
+        // Only handle horizontal swipes
+        if (Math.abs(deltaY) > Math.abs(deltaX)) return;
+        if (Math.abs(deltaX) < 80) return;
+        
+        const tabs = ['chat', 'settings', 'teach', 'review'];
+        const currentIdx = tabs.indexOf(currentTab);
+        
+        if (deltaX < 0 && currentIdx < tabs.length - 1) {
+            // Swipe left -> next tab
+            switchTab(tabs[currentIdx + 1]);
+        } else if (deltaX > 0 && currentIdx > 0) {
+            // Swipe right -> prev tab
+            switchTab(tabs[currentIdx - 1]);
+        }
+    }, { passive: true });
+}
 
 // === CHAT INPUT ===
 userInput.addEventListener('input', () => {
@@ -275,6 +335,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         closeCommandPalette();
         closeShortcuts();
+        closeMobileThoughts();
     }
     if (!palette.classList.contains('open') && !document.querySelector('.modal.open')) {
         if (['1','2','3','4'].includes(e.key)) {
@@ -376,8 +437,20 @@ function startCallVisualizer() {
 voiceBtn.addEventListener('mousedown', startRecording);
 voiceBtn.addEventListener('mouseup', stopRecording);
 voiceBtn.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
-voiceBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
-voiceBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
+voiceBtn.addEventListener('touchstart', (e) => { 
+  e.preventDefault(); 
+  voiceBtn.classList.add('touch-active');
+  startRecording(); 
+}, { passive: false });
+voiceBtn.addEventListener('touchend', (e) => { 
+  e.preventDefault(); 
+  voiceBtn.classList.remove('touch-active');
+  stopRecording(); 
+}, { passive: false });
+voiceBtn.addEventListener('touchcancel', (e) => {
+  voiceBtn.classList.remove('touch-active');
+  stopRecording();
+});
 
 async function audioBufferToRawPCM(audioBuffer, targetSampleRate = 16000) {
     const numChannels = audioBuffer.numberOfChannels;
@@ -1204,6 +1277,13 @@ function updateBadge(count) {
     reviewBadge.textContent = count;
     pillPending.textContent = count;
     reviewBadge.classList.toggle('hidden', count === 0);
+    
+    // Sync mobile badge
+    const mobileBadge = document.getElementById('mobileReviewBadge');
+    if (mobileBadge) {
+        mobileBadge.textContent = count;
+        mobileBadge.classList.toggle('hidden', count === 0);
+    }
 }
 
 // === TTS PLAYBACK ===
@@ -1388,6 +1468,7 @@ async function sendMessage() {
 
 function renderThoughts(thoughts) {
     const container = document.getElementById('thoughtsBody');
+    const mobileContainer = document.getElementById('mobileThoughtsBody');
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
     
     const score = thoughts.confidence_score || 75;
@@ -1510,45 +1591,57 @@ function renderThoughts(thoughts) {
         </div>
     ` : '';
     
-    const card = document.createElement('div');
-    card.className = 'thought-card active';
-    card.innerHTML = `
-        <div class="thought-header">
-            <span class="thought-title">Governance Analysis</span>
-            <span class="thought-time">${time}</span>
-        </div>
-        ${tagsHtml ? `<div class="situation-tags">${tagsHtml}</div>` : ''}
-        ${authHtml}
-        <div class="confidence-section">
-            <div class="confidence-row">
-                <span class="confidence-label">Confidence</span>
-                <div class="confidence-bar-bg">
-                    <div class="confidence-bar-fill ${confFill}" style="width: ${score}%"></div>
-                </div>
-                <span class="confidence-value ${confColor}">${score}%</span>
+    const cardHtml = `
+        <div class="thought-card active">
+            <div class="thought-header">
+                <span class="thought-title">Governance Analysis</span>
+                <span class="thought-time">${time}</span>
             </div>
-            ${breakdownHtml}
-        </div>
-        ${traceHtml}
-        <div class="stages-section">
-            <div class="stages-label">Pipeline Stages</div>
-            <div class="stages-list">${stagesHtml}</div>
-        </div>
-        <div class="refs-section">
-            <div class="refs-label">📚 Knowledge Base References (${(thoughts.references || []).length})</div>
-            <div class="refs-list">${refsHtml || '<span class="ref-item">No references retrieved</span>'}</div>
-        </div>
-        <div class="meta-footer">
-            <span class="meta-item">Model: ${thoughts.model_used || 'unknown'}</span>
-            <span class="meta-item">Tokens: ~${thoughts.prompt_tokens_estimate || 'N/A'}</span>
+            ${tagsHtml ? `<div class="situation-tags">${tagsHtml}</div>` : ''}
+            ${authHtml}
+            <div class="confidence-section">
+                <div class="confidence-row">
+                    <span class="confidence-label">Confidence</span>
+                    <div class="confidence-bar-bg">
+                        <div class="confidence-bar-fill ${confFill}" style="width: ${score}%"></div>
+                    </div>
+                    <span class="confidence-value ${confColor}">${score}%</span>
+                </div>
+                ${breakdownHtml}
+            </div>
+            ${traceHtml}
+            <div class="stages-section">
+                <div class="stages-label">Pipeline Stages</div>
+                <div class="stages-list">${stagesHtml}</div>
+            </div>
+            <div class="refs-section">
+                <div class="refs-label">📚 Knowledge Base References (${(thoughts.references || []).length})</div>
+                <div class="refs-list">${refsHtml || '<span class="ref-item">No references retrieved</span>'}</div>
+            </div>
+            <div class="meta-footer">
+                <span class="meta-item">Model: ${thoughts.model_used || 'unknown'}</span>
+                <span class="meta-item">Tokens: ~${thoughts.prompt_tokens_estimate || 'N/A'}</span>
+            </div>
         </div>
     `;
     
-    const empty = container.querySelector('.empty-thoughts');
-    if (empty) empty.remove();
+    // Desktop thoughts panel
+    if (container) {
+        const empty = container.querySelector('.empty-thoughts');
+        if (empty) empty.remove();
+        
+        container.querySelectorAll('.thought-card').forEach(c => c.classList.remove('active'));
+        container.insertAdjacentHTML('afterbegin', cardHtml);
+    }
     
-    container.querySelectorAll('.thought-card').forEach(c => c.classList.remove('active'));
-    container.prepend(card);
+    // Mobile thoughts sheet
+    if (mobileContainer) {
+        const empty = mobileContainer.querySelector('.empty-thoughts');
+        if (empty) empty.remove();
+        
+        mobileContainer.querySelectorAll('.thought-card').forEach(c => c.classList.remove('active'));
+        mobileContainer.insertAdjacentHTML('afterbegin', cardHtml);
+    }
 }
 
 function quickAsk(text) {
@@ -2044,18 +2137,6 @@ function renderSkeleton(count) {
     `).join('');
 }
 
-// === VOICE TAB SWITCHING ===
-function switchVoiceTab(tab) {
-    // Update buttons
-    document.querySelectorAll('.voice-tab').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.voiceTab === tab);
-    });
-    // Update content
-    document.querySelectorAll('.voice-tab-content').forEach(content => {
-        content.classList.toggle('active', content.id === 'voice-tab-' + tab);
-    });
-}
-
 // === CONNECTION MONITORING ===
 function checkConnection() {
     const status = document.getElementById('connectionStatus');
@@ -2074,8 +2155,22 @@ function checkConnection() {
         });
 }
 
-setInterval(checkConnection, 30000);
-checkConnection();
+// === RESIZE HANDLER ===
+function handleResize() {
+    const newIsMobile = window.innerWidth <= 768;
+    if (newIsMobile !== isMobile) {
+        isMobile = newIsMobile;
+        // Close sidebar when switching to mobile
+        if (isMobile) {
+            document.getElementById('sidebar').classList.remove('open');
+        }
+    }
+}
+
+window.addEventListener('resize', handleResize);
 
 // === INIT ===
+initSwipeGestures();
 loadConfig(); loadStats(); loadDecisions(); loadBehaviors(); loadAuthority(); loadFlags();
+checkConnection();
+setInterval(checkConnection, 30000);
