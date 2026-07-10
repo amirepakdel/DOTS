@@ -197,7 +197,7 @@ class RealtimeCallSession {
         this.silenceStart = null;
         this.callStartTime = null;
         this.callTimerInterval = null;
-        this.ttsTextBuffer = '';           // FIX: renamed for clarity
+        this.ttsTextBuffer = '';
         this.currentContextId = null;
         this.transcriptOverlay = null;
         this.pendingFinalization = false;
@@ -206,11 +206,16 @@ class RealtimeCallSession {
         this.vadThreshold = parseFloat(cfgVadSensitivity?.value || '0.015');
         this.silenceTimeout = parseInt(cfgSilenceTimeout?.value || '600');
         this.bargeInEnabled = (cfgBargeIn?.value || 'true') === 'true';
-        // FIX: Buffer delay 0 because we do sentence-level buffering client-side
         this.ttsBufferDelay = 0;
-        this.isFirstChunk = true;            // FIX: track first chunk for spacing
-        this.audioQueueOffset = 0;           // FIX: for gapless scheduling
-        this.nextPlayTime = 0;               // FIX: schedule audio gaplessly
+        this.isFirstChunk = true;
+        this.audioQueueOffset = 0;
+        this.nextPlayTime = 0;
+        this.ttsSources = [];
+        this.ttsInterrupted = false;
+        // NEW: separate mic context so STT gets true 16 kHz audio
+        this.micAudioContext = null;
+        this.micSource = null;
+        this.micProcessor = null;
     }
 
     async start() {
@@ -225,7 +230,13 @@ class RealtimeCallSession {
                     channelCount: 1
                 }
             });
-            this.audioContext = new AudioContext({ sampleRate: 24000 }); // FIX: TTS outputs 24kHz
+            
+            // TTS playback at 24 kHz (matches Cartesia output)
+            this.audioContext = new AudioContext({ sampleRate: 24000 });
+            
+            // NEW: Mic capture at 16 kHz (matches STT expectation)
+            this.micAudioContext = new AudioContext({ sampleRate: 16000 });
+            
             await this.connectSTT();
             await this.connectTTS();
             this.startVAD();
@@ -260,6 +271,9 @@ class RealtimeCallSession {
 
     cleanup() {
         if (this.callTimerInterval) { clearInterval(this.callTimerInterval); this.callTimerInterval = null; }
+        if (this.micProcessor) { try { this.micProcessor.disconnect(); } catch(e) {} this.micProcessor = null; }
+        if (this.micSource) { try { this.micSource.disconnect(); } catch(e) {} this.micSource = null; }
+        if (this.micAudioContext) { try { this.micAudioContext.close(); } catch(e) {} this.micAudioContext = null; }
         if (this.processor) { try { this.processor.disconnect(); } catch(e) {} this.processor = null; }
         if (this.source) { try { this.source.disconnect(); } catch(e) {} this.source = null; }
         if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
@@ -277,6 +291,8 @@ class RealtimeCallSession {
         this.interimTranscript = '';
         this.isFirstChunk = true;
         this.nextPlayTime = 0;
+        this.ttsSources = [];
+        this.ttsInterrupted = false;
     }
 
     startCallTimer() {
@@ -290,15 +306,26 @@ class RealtimeCallSession {
     }
 
     startVAD() {
-        this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
-        this.processor = this.audioContext.createScriptProcessor(1024, 1, 1);
-        this.processor.onaudioprocess = (e) => {
+        this.micSource = this.micAudioContext.createMediaStreamSource(this.mediaStream);
+        this.micProcessor = this.micAudioContext.createScriptProcessor(1024, 1, 1);
+        
+        this.micProcessor.onaudioprocess = (e) => {
             if (!this.isActive) return;
             const input = e.inputBuffer.getChannelData(0);
             const volume = this.calculateVolume(input);
+
+            // Barge-in: user spoke while AI is playing
             if (volume > this.vadThreshold && this.isAiSpeaking && this.bargeInEnabled) {
                 this.interruptAI();
+                return;
             }
+
+            // AI is speaking and user hasn't barged in — drop the frame
+            if (this.isAiSpeaking) {
+                return;
+            }
+
+            // Normal user speech
             if (volume > this.vadThreshold) {
                 if (!this.isUserSpeaking) {
                     this.isUserSpeaking = true;
@@ -325,14 +352,28 @@ class RealtimeCallSession {
                 }
             }
         };
-        this.source.connect(this.processor);
-        this.processor.connect(this.audioContext.destination);
+        
+        this.micSource.connect(this.micProcessor);
+        
+        // FIX: ScriptProcessorNode MUST be connected to destination for onaudioprocess to fire.
+        // Use zero gain so the microphone doesn't play through the speakers (no echo/feedback).
+        const zeroGain = this.micAudioContext.createGain();
+        zeroGain.gain.value = 0;
+        this.micProcessor.connect(zeroGain);
+        zeroGain.connect(this.micAudioContext.destination);
     }
 
     calculateVolume(buffer) {
         let sum = 0;
-        for (let i = 0; i < buffer.length; i++) { sum += buffer[i] * buffer[i]; }
-        return Math.sqrt(sum / buffer.length);
+        for (let i = 0; i < buffer.length; i++) { 
+            sum += buffer[i] * buffer[i]; 
+        }
+        const volume = Math.sqrt(sum / buffer.length);
+        // DEBUG: Log volume levels
+        if (this.isAiSpeaking && volume > this.vadThreshold * 0.5) {
+            console.log(`[VAD] Volume: ${volume.toFixed(4)}, threshold: ${this.vadThreshold}, isAiSpeaking: ${this.isAiSpeaking}`);
+        }
+        return volume;
     }
 
     floatToInt16(floatArray) {
@@ -347,21 +388,29 @@ class RealtimeCallSession {
     interruptAI() {
         console.log('[Call] Barge-in detected');
         this.isAiSpeaking = false;
-        this.ttsAudioQueue = [];
-        if (this.ttsCurrentSource) {
-            try { this.ttsCurrentSource.stop(); } catch(e) {}
-            this.ttsCurrentSource = null;
-        }
+        
+        // Stop every scheduled TTS source
+        this.ttsSources.forEach(s => { try { s.stop(); } catch(e) {} });
+        this.ttsSources = [];
+        this.nextPlayTime = 0;
+        
         if (this.ttsWs?.readyState === WebSocket.OPEN && this.currentContextId) {
             this.ttsWs.send(JSON.stringify({
                 type: 'cancel',
                 context_id: this.currentContextId
             }));
         }
+        
         this.ttsTextBuffer = '';
         this.currentContextId = null;
         this.isFirstChunk = true;
-        this.nextPlayTime = 0;
+        this.ttsInterrupted = true;
+        
+        // Clear accumulated STT transcript from AI echo
+        this.finalTranscript = '';
+        this.interimTranscript = '';
+        this.updateTranscriptOverlay('', false);
+        
         this.updateCallStatus('You interrupted — listening...');
     }
 
@@ -445,8 +494,11 @@ class RealtimeCallSession {
             };
             this.ttsWs.onmessage = async (event) => {
                 if (event.data instanceof Blob) {
+                    // Drop late chunks from cancelled generation
+                    if (this.ttsInterrupted) {
+                        return;
+                    }
                     const arrayBuffer = await event.data.arrayBuffer();
-                    // FIX: Schedule for gapless playback instead of queue+shift
                     this.scheduleAudioPlayback(arrayBuffer);
                     if (!this.isAiSpeaking) {
                         this.isAiSpeaking = true;
@@ -463,10 +515,12 @@ class RealtimeCallSession {
                         // Context fully flushed
                     }
                     else if (data.type === 'done') {
-                        // All audio for context delivered, check if done playing
                         setTimeout(() => {
-                            if (!this.isAiSpeaking && this.ttsAudioQueue.length === 0) {
+                            if (this.isActive && this.ttsSources.length === 0 && !this.ttsInterrupted) {
+                                this.isAiSpeaking = false;
                                 this.currentContextId = null;
+                                this.isFirstChunk = true;
+                                this.nextPlayTime = 0;
                                 this.updateCallStatus('Listening...');
                             }
                         }, 500);
@@ -489,7 +543,6 @@ class RealtimeCallSession {
             setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('TTS timeout')); } }, 10000);
         });
     }
-
     // FIX: Gapless audio scheduling using AudioContext clock
     scheduleAudioPlayback(arrayBuffer) {
         if (!this.audioContext || !this.isActive) return;
@@ -513,27 +566,37 @@ class RealtimeCallSession {
         source.connect(this.audioContext.destination);
 
         const now = this.audioContext.currentTime;
-        // Start immediately if first chunk, otherwise schedule after previous chunk ends
         if (this.nextPlayTime <= now) {
             this.nextPlayTime = now;
         }
+        const chunkStartTime = this.nextPlayTime;
         source.start(this.nextPlayTime);
         this.nextPlayTime += audioBuffer.duration;
 
-        // Mark AI as done speaking after last chunk finishes
+        this.ttsSources.push(source);
+
         source.onended = () => {
-            const timeUntilEnd = this.nextPlayTime - this.audioContext.currentTime;
-            if (timeUntilEnd <= 0.05) {  // All queued audio has played
+            const idx = this.ttsSources.indexOf(source);
+            if (idx > -1) this.ttsSources.splice(idx, 1);
+            
+            const chunkEndTime = chunkStartTime + audioBuffer.duration;
+            const isLastChunk = Math.abs(this.nextPlayTime - chunkEndTime) < 0.01;
+            
+            if (isLastChunk && this.isActive && !this.ttsInterrupted) {
                 this.isAiSpeaking = false;
                 this.currentContextId = null;
                 this.isFirstChunk = true;
-                this.updateCallStatus('Listening...');
+                this.nextPlayTime = 0;
+                this.updateCallStatus('Listening... Speak naturally');
             }
         };
     }
 
     async processUserTurn(text) {
         if (!text || !this.isActive) return;
+        
+        this.ttsInterrupted = false;  // ← ADD THIS LINE at the top
+        
         console.log('[Call] User turn:', text);
         this.updateCallStatus('DTOS is thinking...');
         appendMessage('user', text);
@@ -1150,34 +1213,126 @@ function renderThoughts(thoughts) {
     const confFill = score >= 80 ? 'fill-high' : score >= 50 ? 'fill-med' : 'fill-low';
     const confColor = score >= 80 ? 'conf-high' : score >= 50 ? 'conf-med' : 'conf-low';
     
-    // Authority status
+    // Authority status with detailed breakdown
     let authHtml = '';
     if (thoughts.has_forbidden) {
-        authHtml = `<div class="auth-status auth-forbidden">🛡️ FORBIDDEN — Autonomous action blocked</div>`;
+        const forbiddenRules = (thoughts.authority_violations || []).filter(v => v.allowed === 'no');
+        authHtml = `
+            <div class="auth-status auth-forbidden">
+                <div class="auth-header">🛡️ FORBIDDEN — Autonomous action blocked</div>
+                <div class="auth-details">
+                    ${forbiddenRules.map(r => `
+                        <div class="auth-rule-detail">
+                            <span class="rule-name">${escapeHtml(r.rule)}</span>
+                            <span class="rule-condition">${escapeHtml(r.condition)}</span>
+                            <span class="rule-fallback">Fallback: ${escapeHtml(r.fallback)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
     } else if (thoughts.has_conditional) {
-        authHtml = `<div class="auth-status auth-conditional">🛡️ Conditional Authority — ${thoughts.authority_violations.length} rule(s) matched</div>`;
+        const condRules = (thoughts.authority_violations || []).filter(v => v.allowed === 'conditional');
+        authHtml = `
+            <div class="auth-status auth-conditional">
+                <div class="auth-header">🛡️ Conditional Authority — ${condRules.length} rule(s) matched</div>
+                <div class="auth-details">
+                    ${condRules.map(r => `
+                        <div class="auth-rule-detail">
+                            <span class="rule-name">${escapeHtml(r.rule)}</span>
+                            <span class="rule-condition">Condition: ${escapeHtml(r.condition)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
     } else {
         authHtml = `<div class="auth-status auth-cleared">🛡️ Authority Cleared — No violations</div>`;
     }
     
-    // Situation tags
+    // Situation tags with descriptions
+    const situationDescriptions = {
+        'high_stakes_meeting': 'Formal tone + evidence required',
+        'governance_risk': 'Stricter governance checks',
+        'authority_boundary': 'Authority rules activated',
+        'emotional_seller': 'Empathetic persona engaged',
+        'hostile': 'De-escalation protocols',
+        'legal': 'Legal review recommended',
+        'technical_issue': 'Technical support mode',
+        'compliance_audit': 'Full trace logging',
+        'persona_switch': 'Dynamic style change',
+        'human_override': 'Human takeover flagged'
+    };
+    
     const tagsHtml = (thoughts.situations_detected || []).map(s => {
         const cls = s.includes('hostile') || s.includes('forbidden') ? 'tag-danger' : 
                     s.includes('risk') || s.includes('boundary') ? 'tag-warn' : 'tag-info';
-        return `<span class="sit-tag ${cls}">${s}</span>`;
+        const desc = situationDescriptions[s] || '';
+        return `<span class="sit-tag ${cls}" title="${escapeHtml(desc)}">${s}</span>`;
+    }).join('');
+    
+    // Confidence breakdown
+    const breakdown = thoughts.confidence_breakdown || {};
+    const breakdownHtml = `
+        <div class="confidence-breakdown">
+            <div class="cb-row"><span class="cb-label">Base Score</span><span class="cb-val">${breakdown.base_score || 75}</span></div>
+            ${breakdown.forbidden_bonus ? `<div class="cb-row"><span class="cb-label">Forbidden Bonus</span><span class="cb-val success">+${breakdown.forbidden_bonus}</span></div>` : ''}
+            ${breakdown.conditional_penalty ? `<div class="cb-row"><span class="cb-label">Conditional Penalty</span><span class="cb-val warning">${breakdown.conditional_penalty}</span></div>` : ''}
+            ${breakdown.decision_bonus ? `<div class="cb-row"><span class="cb-label">Decision Bonus</span><span class="cb-val success">+${breakdown.decision_bonus}</span></div>` : ''}
+            ${breakdown.behavior_bonus ? `<div class="cb-row"><span class="cb-label">Behavior Bonus</span><span class="cb-val success">+${breakdown.behavior_bonus}</span></div>` : ''}
+            <div class="cb-row total"><span class="cb-label">Final Score</span><span class="cb-val ${confColor}">${breakdown.final_score || score}%</span></div>
+        </div>
+    `;
+    
+    // Pipeline stages
+    const stages = thoughts.pipeline_stages || {};
+    const stagesHtml = Object.entries(stages).map(([key, val]) => {
+        const statusIcon = val.status === 'completed' ? '✓' : '○';
+        const statusClass = val.status === 'completed' ? 'stage-done' : 'stage-pending';
+        let details = '';
+        if (key === 'situation_detection' && val.matches !== undefined) {
+            details = `${val.matches} match(es)`;
+        } else if (key === 'authority_check') {
+            details = `${val.layer1_keyword_matches || 0} keyword, ${val.layer2_semantic_matches || 0} semantic`;
+        } else if (key === 'kb_retrieval') {
+            details = `${val.decisions || 0} decisions, ${val.behaviors || 0} behaviors`;
+        } else if (key === 'response_build' && val.model) {
+            details = val.model;
+        }
+        return `
+            <div class="stage-row ${statusClass}">
+                <span class="stage-icon">${statusIcon}</span>
+                <span class="stage-name">${key.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase())}</span>
+                <span class="stage-detail">${details}</span>
+            </div>
+        `;
     }).join('');
     
     // References
     const refsHtml = (thoughts.references || []).map(ref => {
         const icons = { decision: '📊', authority: '🛡️', behavior: '🎭' };
+        const typeClass = ref.type === 'authority' && ref.allowed === 'no' ? 'ref-forbidden' : 
+                         ref.type === 'authority' && ref.allowed === 'conditional' ? 'ref-conditional' : '';
         return `
-        <div class="ref-item" onclick="highlightRef('${ref.id}')">
+        <div class="ref-item ${typeClass}" onclick="highlightRef('${ref.id}')">
             <span class="ref-icon">${icons[ref.type] || '📄'}</span>
             <span class="ref-id">${ref.id}</span>
             <span class="ref-title">${escapeHtml(ref.title)}</span>
             <span class="ref-score">${ref.score.toFixed(2)}</span>
+            ${ref.allowed ? `<span class="ref-allowed ${ref.allowed}">${ref.allowed.toUpperCase()}</span>` : ''}
         </div>`;
     }).join('');
+    
+    // Reasoning trace (collapsible)
+    const traceHtml = thoughts.reasoning_trace ? `
+        <div class="trace-section">
+            <div class="trace-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+                <span>📋 Full Reasoning Trace</span>
+                <span class="trace-toggle">▼</span>
+            </div>
+            <div class="trace-content collapsed">
+                <pre>${escapeHtml(thoughts.reasoning_trace)}</pre>
+            </div>
+        </div>
+    ` : '';
     
     const card = document.createElement('div');
     card.className = 'thought-card active';
@@ -1188,17 +1343,28 @@ function renderThoughts(thoughts) {
         </div>
         ${tagsHtml ? `<div class="situation-tags">${tagsHtml}</div>` : ''}
         ${authHtml}
-        <div class="confidence-row">
-            <span class="confidence-label">Confidence</span>
-            <div class="confidence-bar-bg">
-                <div class="confidence-bar-fill ${confFill}" style="width: ${score}%"></div>
+        <div class="confidence-section">
+            <div class="confidence-row">
+                <span class="confidence-label">Confidence</span>
+                <div class="confidence-bar-bg">
+                    <div class="confidence-bar-fill ${confFill}" style="width: ${score}%"></div>
+                </div>
+                <span class="confidence-value ${confColor}">${score}%</span>
             </div>
-            <span class="confidence-value ${confColor}">${score}%</span>
+            ${breakdownHtml}
         </div>
-        <div class="thought-content">${escapeHtml(thoughts.reasoning_trace)}</div>
+        ${traceHtml}
+        <div class="stages-section">
+            <div class="stages-label">Pipeline Stages</div>
+            <div class="stages-list">${stagesHtml}</div>
+        </div>
         <div class="refs-section">
-            <div class="refs-label">📚 Knowledge Base References</div>
+            <div class="refs-label">📚 Knowledge Base References (${(thoughts.references || []).length})</div>
             <div class="refs-list">${refsHtml || '<span class="ref-item">No references retrieved</span>'}</div>
+        </div>
+        <div class="meta-footer">
+            <span class="meta-item">Model: ${thoughts.model_used || 'unknown'}</span>
+            <span class="meta-item">Tokens: ~${thoughts.prompt_tokens_estimate || 'N/A'}</span>
         </div>
     `;
     
@@ -1245,12 +1411,28 @@ async function clearChat() {
 async function loadDecisions(category = '') {
     try {
         decisionsList.innerHTML = renderSkeleton(3);
-        const url = category ? `/api/decisions?category=${category}` : '/api/decisions';
+        
+        const url = category 
+            ? `/api/decisions?category=${category}` 
+            : '/api/decisions';
+        
         const res = await fetch(url);
         const data = await res.json();
-        allDecisions = data.decisions || [];
+        
+        // FIXED: Handle both plain array and wrapped response
+        allDecisions = Array.isArray(data) ? data : (data.decisions || data.results || []);
+        
+        console.log(`Loaded ${allDecisions.length} decisions`, allDecisions); // Debug
+        
         filterDecisions();
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        console.error("Failed to load decisions:", e);
+        decisionsList.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">⚠️</div>
+                <div class="empty-title">Failed to load decisions</div>
+            </div>`;
+    }
 }
 
 function filterDecisions() {
@@ -1332,11 +1514,24 @@ async function deleteDecision(id) { if (!confirm('Delete this governance decisio
 async function loadBehaviors() {
     try {
         behaviorsList.innerHTML = renderSkeleton(3);
+        
         const res = await fetch('/api/behaviors');
         const data = await res.json();
-        allBehaviors = data.behaviors || [];
+        
+        // FIXED
+        allBehaviors = Array.isArray(data) ? data : (data.behaviors || data.results || []);
+        
+        console.log(`✅ Loaded ${allBehaviors.length} behaviors`, allBehaviors);
+        
         filterBehaviors();
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        console.error("Failed to load behaviors:", e);
+        behaviorsList.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">⚠️</div>
+                <div class="empty-title">Failed to load behaviors</div>
+            </div>`;
+    }
 }
 
 function filterBehaviors() {
@@ -1408,11 +1603,24 @@ async function deleteBehavior(id) { if (!confirm('Delete this persona behavior?'
 async function loadAuthority() {
     try {
         authorityList.innerHTML = renderSkeleton(3);
+        
         const res = await fetch('/api/authority');
         const data = await res.json();
-        allAuthority = data.rules || [];
+        
+        // FIXED
+        allAuthority = Array.isArray(data) ? data : (data.rules || data.results || []);
+        
+        console.log(`✅ Loaded ${allAuthority.length} authority rules`, allAuthority);
+        
         filterAuthority();
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        console.error("Failed to load authority rules:", e);
+        authorityList.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">⚠️</div>
+                <div class="empty-title">Failed to load authority rules</div>
+            </div>`;
+    }
 }
 
 function filterAuthority() {

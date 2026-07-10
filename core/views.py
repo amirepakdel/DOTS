@@ -255,7 +255,8 @@ class FlagViewSet(viewsets.ModelViewSet):
 
 
 class ChatView(APIView):
-    """Standard non-streaming chat endpoint."""
+    """Standard non-streaming chat endpoint with detailed governance trace."""
+
     def _calculate_confidence(self, violations, decisions, behaviors):
         """Calculate a 0-100 confidence score based on match quality."""
         score = 75  # base confidence
@@ -269,21 +270,80 @@ class ChatView(APIView):
             score += min(len(behaviors) * 3, 6)   # +3 per behavior, max +6
         return min(score, 100)
 
-    def _build_reasoning_trace(self, situations, violations, decisions, behaviors):
-        """Build a human-readable reasoning summary."""
+    def _build_reasoning_trace(self, situations, violations, decisions, behaviors, authority_docs=None):
+        """Build a detailed human-readable reasoning summary for managers."""
         trace_parts = []
+        
+        # Stage 1: Input summary
+        trace_parts.append("=== Stage 1: Input Analysis ===")
+        trace_parts.append("Message received and validated. History context loaded.")
+        
+        # Stage 2: Situation detection
+        trace_parts.append("\n=== Stage 2: Situation Detection ===")
         if situations:
-            trace_parts.append(f"Detected situations: {', '.join(situations)}.")
+            trace_parts.append(f"Detected {len(situations)} situation(s): {', '.join(situations)}.")
+            for sit in situations:
+                if sit == 'governance_risk':
+                    trace_parts.append("  → Governance risk detected: stricter evidence requirements activated.")
+                elif sit == 'authority_boundary':
+                    trace_parts.append("  → Authority boundary crossed: authority rule engine activated.")
+                elif sit == 'high_stakes_meeting':
+                    trace_parts.append("  → High-stakes context: formal tone and documentation required.")
+                elif sit == 'hostile':
+                    trace_parts.append("  → Hostile tone detected: de-escalation protocols engaged.")
+                elif sit == 'legal':
+                    trace_parts.append("  → Legal context flagged: recommend human legal review.")
+        else:
+            trace_parts.append("No specific situations detected. Default advisory mode.")
+        
+        # Stage 3: Authority check
+        trace_parts.append("\n=== Stage 3: Authority Check ===")
+        trace_parts.append("Layer 1 (Keyword Match): Scanned all active authority rules against message content.")
         if violations:
-            v = violations[0]
-            trace_parts.append(f"Authority check: '{v['rule']}' — allowed: {v['allowed']}.")
+            for v in violations:
+                status = "FORBIDDEN" if v['allowed'] == 'no' else "CONDITIONAL" if v['allowed'] == 'conditional' else "ALLOWED"
+                trace_parts.append(f"  → MATCH: Rule '{v['rule']}' → Status: {status}")
+                trace_parts.append(f"    Condition: {v['condition']}")
+                trace_parts.append(f"    Fallback: {v['fallback']}")
+            if any(v['allowed'] == 'no' for v in violations):
+                trace_parts.append("  → CRITICAL: Hard FORBIDDEN rule triggered. Autonomous refusal required.")
+        else:
+            trace_parts.append("  → No keyword violations found.")
+        
+        # Layer 2: Semantic authority
+        trace_parts.append("\nLayer 2 (Semantic Search): Queried vectorstore for semantically similar authority rules.")
+        if authority_docs:
+            trace_parts.append(f"  → Found {len(authority_docs)} relevant rule(s) via embedding similarity.")
+            for i, doc in enumerate(authority_docs, 1):
+                trace_parts.append(f"    [{i}] {doc.page_content[:120]}...")
+        else:
+            trace_parts.append("  → No additional semantic matches above threshold.")
+        
+        # Stage 4: KB Retrieval
+        trace_parts.append("\n=== Stage 4: Knowledge Base Retrieval ===")
         if decisions:
-            trace_parts.append(f"Retrieved {len(decisions)} relevant decision patterns from knowledge base.")
+            trace_parts.append(f"Retrieved {len(decisions)} decision pattern(s) from PGVector:")
+            for i, d in enumerate(decisions, 1):
+                src = d.metadata.get('source', 'unknown')
+                trace_parts.append(f"  [{i}] {src} | {d.page_content[:100]}...")
+        else:
+            trace_parts.append("No relevant decision patterns retrieved.")
+        
         if behaviors:
-            trace_parts.append(f"Applied {len(behaviors)} persona behavior styles.")
-        return " ".join(trace_parts) or "No specific governance triggers detected."
+            trace_parts.append(f"\nApplied {len(behaviors)} behavior style(s):")
+            for b in behaviors:
+                trace_parts.append(f"  → {b['situation']} | Tone: {b['tone']}")
+        else:
+            trace_parts.append("No behavior styles matched.")
+        
+        # Stage 5: Response Build
+        trace_parts.append("\n=== Stage 5: Response Build ===")
+        trace_parts.append("Master prompt assembled with all governance context injected.")
+        trace_parts.append("LLM invoked with temperature=0.3 (deterministic mode).")
+        
+        return "\n".join(trace_parts)
 
-    def _build_references(self, decisions, behaviors, violations):
+    def _build_references(self, decisions, behaviors, violations, authority_docs=None):
         """Build reference list with IDs, titles, and similarity scores."""
         refs = []
         for d in decisions:
@@ -291,22 +351,33 @@ class ChatView(APIView):
                 "id": f"dec-{d.metadata.get('id', 'unknown')}",
                 "type": "decision",
                 "title": d.page_content[:60] + "..." if len(d.page_content) > 60 else d.page_content,
-                "score": 0.85  # You could compute actual cosine similarity here
+                "score": 0.85,  # Could compute actual cosine similarity
+                "source": d.metadata.get('source', 'unknown')
             })
-        # Add authority rules as references too
         for v in violations:
             refs.append({
                 "id": f"auth-{v['id']}",
                 "type": "authority",
                 "title": v['rule'],
-                "score": 0.94
+                "score": 0.94,
+                "allowed": v['allowed'],
+                "condition": v['condition']
+            })
+        for doc in (authority_docs or []):
+            refs.append({
+                "id": f"auth-sem-{doc.metadata.get('id', 'unknown')}",
+                "type": "authority",
+                "title": doc.page_content[:60] + "...",
+                "score": 0.82,
+                "match_type": "semantic"
             })
         for b in behaviors:
             refs.append({
                 "id": f"beh-{b['id']}",
-                "type": "behavior", 
+                "type": "behavior",
                 "title": b['situation'][:60] + "..." if len(b['situation']) > 60 else b['situation'],
-                "score": 0.76
+                "score": 0.76,
+                "tone": b['tone']
             })
         return refs
 
@@ -332,13 +403,18 @@ class ChatView(APIView):
 
         decisions = []
         behaviors = []
+        authority_docs = []
+        
         if use_kb:
             decisions = get_relevant_decisions(user_message, top_k=3)
             behaviors = get_relevant_behaviors(situations)
+            # NEW: Also get semantic authority rules
+            authority_docs = get_relevant_authority_rules(user_message, top_k=2)
 
         history = get_history(session_id, limit=int(config.get('max_history', 10)))
         full_prompt = build_master_prompt(
             user_message, config, history, situations, violations, decisions, behaviors,
+            authority_docs=authority_docs,
             include_reasoning_in_output=False
         )
 
@@ -384,6 +460,15 @@ class ChatView(APIView):
 
         save_message(session_id, "assistant", reply)
 
+        # Calculate confidence
+        confidence = self._calculate_confidence(violations, decisions, behaviors)
+        
+        # Build detailed reasoning trace
+        reasoning_trace = self._build_reasoning_trace(situations, violations, decisions, behaviors, authority_docs)
+        
+        # Build references
+        references = self._build_references(decisions, behaviors, violations, authority_docs)
+
         suggest_flag = False
         flag_reason = None
         if has_conditional and config.get('auto_flag_conditional', 'true').lower() == 'true':
@@ -412,11 +497,41 @@ class ChatView(APIView):
                 "authority_violations": violations,
                 "has_forbidden": has_forbidden,
                 "has_conditional": has_conditional,
-                "confidence_score": self._calculate_confidence(violations, decisions, behaviors),
-                "reasoning_trace": self._build_reasoning_trace(situations, violations, decisions, behaviors),
-                "references": self._build_references(decisions, behaviors, violations),
+                "confidence_score": confidence,
+                "confidence_breakdown": {
+                    "base_score": 75,
+                    "forbidden_bonus": 20 if has_forbidden else 0,
+                    "conditional_penalty": -10 if has_conditional else 0,
+                    "decision_bonus": min(len(decisions) * 5, 15),
+                    "behavior_bonus": min(len(behaviors) * 3, 6),
+                    "final_score": confidence
+                },
+                "reasoning_trace": reasoning_trace,
+                "references": references,
                 "model_used": model_used,
-                "timestamp": timezone.now().isoformat()
+                "prompt_tokens_estimate": len(full_prompt.split()),  # Rough estimate
+                "timestamp": timezone.now().isoformat(),
+                "pipeline_stages": {
+                    "input_analysis": {"status": "completed", "history_loaded": len(history)},
+                    "situation_detection": {"status": "completed", "matches": len(situations), "categories": situations},
+                    "authority_check": {
+                        "status": "completed",
+                        "layer1_keyword_matches": len(violations),
+                        "layer2_semantic_matches": len(authority_docs),
+                        "has_forbidden": has_forbidden
+                    },
+                    "kb_retrieval": {
+                        "status": "completed",
+                        "decisions": len(decisions),
+                        "behaviors": len(behaviors),
+                        "authority_semantic": len(authority_docs)
+                    },
+                    "response_build": {
+                        "status": "completed",
+                        "model": model_used,
+                        "temperature": 0.3
+                    }
+                }
             }
         }
 
@@ -425,6 +540,7 @@ class ChatStreamView(APIView):
     """
     Streaming chat endpoint for real-time voice calls.
     Returns Server-Sent Events (SSE) with text chunks as they are generated.
+    Includes thoughts metadata in the final done chunk.
     """
 
     def post(self, request):
@@ -440,6 +556,7 @@ class ChatStreamView(APIView):
             situations = detect_situation(user_message)
             violations = check_authority(user_message)
             has_forbidden = any(v['allowed'] == 'no' for v in violations)
+            has_conditional = any(v['allowed'] == 'conditional' for v in violations)
 
             # Handle forbidden immediately
             if has_forbidden:
@@ -452,13 +569,16 @@ class ChatStreamView(APIView):
 
             decisions = []
             behaviors = []
+            authority_docs = []
             if use_kb:
                 decisions = get_relevant_decisions(user_message, top_k=3)
                 behaviors = get_relevant_behaviors(situations)
+                authority_docs = get_relevant_authority_rules(user_message, top_k=2)
 
             history = get_history(session_id, limit=int(config.get('max_history', 10)))
             full_prompt = build_master_prompt(
                 user_message, config, history, situations, violations, decisions, behaviors,
+                authority_docs=authority_docs,
                 include_reasoning_in_output=False
             )
 
@@ -508,7 +628,33 @@ class ChatStreamView(APIView):
                 # Save complete response
                 if full_reply:
                     save_message(session_id, "assistant", full_reply)
-                yield f"data: {json.dumps({'text': '', 'done': True})}\n\n"
+                
+                # Build thoughts for the final chunk
+                confidence = self._calculate_confidence(violations, decisions, behaviors)
+                reasoning_trace = self._build_reasoning_trace(situations, violations, decisions, behaviors, authority_docs)
+                references = self._build_references(decisions, behaviors, violations, authority_docs)
+                
+                thoughts = {
+                    "situations_detected": situations,
+                    "authority_violations": violations,
+                    "has_forbidden": has_forbidden,
+                    "has_conditional": has_conditional,
+                    "confidence_score": confidence,
+                    "confidence_breakdown": {
+                        "base_score": 75,
+                        "forbidden_bonus": 20 if has_forbidden else 0,
+                        "conditional_penalty": -10 if has_conditional else 0,
+                        "decision_bonus": min(len(decisions) * 5, 15),
+                        "behavior_bonus": min(len(behaviors) * 3, 6),
+                        "final_score": confidence
+                    },
+                    "reasoning_trace": reasoning_trace,
+                    "references": references,
+                    "model_used": "claude-3-5-sonnet" if settings.ANTHROPIC_API_KEY else "gpt-4o-mini",
+                    "timestamp": timezone.now().isoformat()
+                }
+                
+                yield f"data: {json.dumps({'text': '', 'done': True, 'thoughts': thoughts})}\n\n"
 
         response = StreamingHttpResponse(
             event_stream(),
@@ -517,6 +663,71 @@ class ChatStreamView(APIView):
         response['Cache-Control'] = 'no-cache'
         response['X-Accel-Buffering'] = 'no'
         return response
+
+    def _calculate_confidence(self, violations, decisions, behaviors):
+        score = 75
+        if any(v['allowed'] == 'no' for v in violations):
+            score = 95
+        elif any(v['allowed'] == 'conditional' for v in violations):
+            score = 65
+        score += min(len(decisions) * 5, 15)
+        score += min(len(behaviors) * 3, 6)
+        return min(score, 100)
+
+    def _build_reasoning_trace(self, situations, violations, decisions, behaviors, authority_docs=None):
+        trace_parts = []
+        trace_parts.append("=== Stage 1: Input Analysis ===")
+        trace_parts.append("Message received and validated. History context loaded.")
+        
+        trace_parts.append("\n=== Stage 2: Situation Detection ===")
+        if situations:
+            trace_parts.append(f"Detected {len(situations)} situation(s): {', '.join(situations)}.")
+        else:
+            trace_parts.append("No specific situations detected.")
+        
+        trace_parts.append("\n=== Stage 3: Authority Check ===")
+        if violations:
+            for v in violations:
+                status = "FORBIDDEN" if v['allowed'] == 'no' else "CONDITIONAL"
+                trace_parts.append(f"  → Rule '{v['rule']}' → Status: {status}")
+        else:
+            trace_parts.append("  → No keyword violations.")
+        
+        if authority_docs:
+            trace_parts.append(f"\n  → {len(authority_docs)} semantic match(es) found.")
+        
+        trace_parts.append("\n=== Stage 4: KB Retrieval ===")
+        trace_parts.append(f"Retrieved {len(decisions)} decision(s), {len(behaviors)} behavior(s).")
+        
+        trace_parts.append("\n=== Stage 5: Response Build ===")
+        trace_parts.append("Master prompt assembled. LLM invoked.")
+        
+        return "\n".join(trace_parts)
+
+    def _build_references(self, decisions, behaviors, violations, authority_docs=None):
+        refs = []
+        for d in decisions:
+            refs.append({
+                "id": f"dec-{d.metadata.get('id', 'unknown')}",
+                "type": "decision",
+                "title": d.page_content[:60] + "...",
+                "score": 0.85
+            })
+        for v in violations:
+            refs.append({
+                "id": f"auth-{v['id']}",
+                "type": "authority",
+                "title": v['rule'],
+                "score": 0.94
+            })
+        for b in behaviors:
+            refs.append({
+                "id": f"beh-{b['id']}",
+                "type": "behavior",
+                "title": b['situation'][:60] + "...",
+                "score": 0.76
+            })
+        return refs
 
 
 class HistoryView(APIView):
