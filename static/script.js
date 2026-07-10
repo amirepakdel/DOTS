@@ -1,4 +1,4 @@
-// === DTOS Digital Twin Operating System - Frontend Controller ===
+// === DTOS Digital Twin Operating System - Frontend Controller v2.0 ===
 const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
 let currentTab = 'chat';
 let currentSubTab = 'decisions';
@@ -9,17 +9,20 @@ let lastContext = '';
 let allDecisions = [];
 let allBehaviors = [];
 let allAuthority = [];
+let isThoughtsOpen = true;
 
-// === VOICE MESSAGE STATE (existing hold-to-record) ===
+// === VOICE MESSAGE STATE ===
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
 let recordingStartTime = 0;
 let recordingTimer = null;
 let currentAudio = null;
+let voiceAnimFrame = null;
 
-// === VOICE CALL STATE (NEW - real-time conversation) ===
+// === VOICE CALL STATE ===
 let callSession = null;
+let callAnimFrame = null;
 
 // === DOM ===
 const navItems = document.querySelectorAll('.nav-item');
@@ -35,17 +38,17 @@ const sendBtn = document.getElementById('sendBtn');
 const clearBtn = document.getElementById('clearBtn');
 const flagBtn = document.getElementById('flagBtn');
 const useKb = document.getElementById('useKb');
+const scrollToBottomBtn = document.getElementById('scrollToBottom');
+const inputStatus = document.getElementById('inputStatus');
 
-// Voice Message elements
 const voiceBtn = document.getElementById('voiceBtn');
 const voiceLabel = document.getElementById('voiceLabel');
-const voiceWave = document.getElementById('voiceWave');
+const voiceCanvas = document.getElementById('voiceCanvas');
 const voiceStatus = document.getElementById('voiceStatus');
 
-// Voice Call elements (NEW)
 const callBtn = document.getElementById('callBtn');
 const callLabel = document.getElementById('callLabel');
-const callWave = document.getElementById('callWave');
+const callCanvas = document.getElementById('callCanvas');
 const callStatus = document.getElementById('callStatus');
 const callTimer = document.getElementById('callTimer');
 
@@ -101,17 +104,116 @@ const authSearch = document.getElementById('authSearch');
 const flagsList = document.getElementById('flagsList');
 const filterPills = document.querySelectorAll('.pill');
 
-// === INIT ===
+// === COMMAND PALETTE ===
+const palette = document.getElementById('commandPalette');
+const paletteInput = document.getElementById('paletteInput');
+const paletteResults = document.getElementById('paletteResults');
+
+const COMMANDS = [
+    { id: 'chat', label: 'Chat', icon: '💬', shortcut: '1', action: () => switchTab('chat') },
+    { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: '2', action: () => switchTab('settings') },
+    { id: 'teach', label: 'Teaching', icon: '🎓', shortcut: '3', action: () => switchTab('teach') },
+    { id: 'review', label: 'Review', icon: '🚩', shortcut: '4', action: () => switchTab('review') },
+    { id: 'clear', label: 'Clear Chat', icon: '🗑️', shortcut: 'Ctrl+L', action: () => clearChat() },
+    { id: 'flag', label: 'Flag for Audit', icon: '🚩', shortcut: '', action: () => manualFlag() },
+    { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: '⌨️', shortcut: '', action: () => openShortcuts() },
+    { id: 'thoughts', label: 'Toggle Thoughts Panel', icon: '🧠', shortcut: '', action: () => toggleThoughts() },
+];
+
+function openCommandPalette() {
+    palette.classList.add('open');
+    paletteInput.value = '';
+    paletteInput.focus();
+    renderPaletteResults('');
+}
+
+function closeCommandPalette() {
+    palette.classList.remove('open');
+}
+
+function renderPaletteResults(query) {
+    const filtered = COMMANDS.filter(c => c.label.toLowerCase().includes(query.toLowerCase()));
+    if (filtered.length === 0) {
+        paletteResults.innerHTML = '<div class="palette-item">No results found</div>';
+        return;
+    }
+    paletteResults.innerHTML = filtered.map((c, i) => `
+        <div class="palette-item ${i === 0 ? 'active' : ''}" data-index="${i}" onclick="executePaletteCommand('${c.id}')">
+            <div class="palette-item-icon">${c.icon}</div>
+            <span>${c.label}</span>
+            ${c.shortcut ? `<span class="palette-item-meta">${c.shortcut}</span>` : ''}
+        </div>
+    `).join('');
+}
+
+function executePaletteCommand(id) {
+    const cmd = COMMANDS.find(c => c.id === id);
+    if (cmd) { cmd.action(); closeCommandPalette(); }
+}
+
+paletteInput.addEventListener('input', (e) => renderPaletteResults(e.target.value));
+paletteInput.addEventListener('keydown', (e) => {
+    const items = paletteResults.querySelectorAll('.palette-item');
+    const active = paletteResults.querySelector('.palette-item.active');
+    let idx = active ? parseInt(active.dataset.index) : -1;
+    
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        idx = Math.min(idx + 1, items.length - 1);
+        items.forEach((item, i) => item.classList.toggle('active', i === idx));
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        idx = Math.max(idx - 1, 0);
+        items.forEach((item, i) => item.classList.toggle('active', i === idx));
+    } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (active) active.click();
+    } else if (e.key === 'Escape') {
+        closeCommandPalette();
+    }
+});
+
+// === SHORTCUTS MODAL ===
+function openShortcuts() {
+    document.getElementById('shortcutsModal').classList.add('open');
+}
+
+function closeShortcuts() {
+    document.getElementById('shortcutsModal').classList.remove('open');
+}
+
+// === SIDEBAR & NAVIGATION ===
+function switchTab(tab) {
+    navItems.forEach(i => i.classList.toggle('active', i.dataset.tab === tab));
+    panels.forEach(p => p.classList.toggle('active', p.id === tab + 'Panel'));
+    currentTab = tab;
+    
+    // Update breadcrumb
+    const bcIcon = document.querySelector('.bc-icon');
+    const bcText = document.querySelector('.bc-text');
+    const labels = { chat: '💬 Operations Center', settings: '⚙️ Governance & Configuration', teach: '🎓 Knowledge & Governance Center', review: '🚩 Audit & Review Panel' };
+    if (bcIcon && bcText) {
+        bcIcon.textContent = labels[tab].split(' ')[0];
+        bcText.textContent = labels[tab].split(' ').slice(1).join(' ');
+    }
+    
+    if (tab === 'teach') { loadDecisions(); loadBehaviors(); loadAuthority(); }
+    if (tab === 'review') loadFlags();
+    if (tab === 'settings') { loadConfig(); loadStats(); }
+}
+
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+}
+
+function toggleThoughts() {
+    const panel = document.getElementById('thoughtsPanel');
+    isThoughtsOpen = !isThoughtsOpen;
+    panel.classList.toggle('collapsed', !isThoughtsOpen);
+}
+
 navItems.forEach(item => {
-    item.addEventListener('click', () => {
-        const tab = item.dataset.tab;
-        navItems.forEach(i => i.classList.toggle('active', i === item));
-        panels.forEach(p => p.classList.toggle('active', p.id === tab + 'Panel'));
-        currentTab = tab;
-        if (tab === 'teach') { loadDecisions(); loadBehaviors(); loadAuthority(); }
-        if (tab === 'review') loadFlags();
-        if (tab === 'settings') { loadConfig(); loadStats(); }
-    });
+    item.addEventListener('click', () => switchTab(item.dataset.tab));
 });
 
 subTabs.forEach(btn => {
@@ -134,9 +236,20 @@ filterPills.forEach(pill => {
     });
 });
 
+// === CHAT INPUT ===
 userInput.addEventListener('input', () => {
     userInput.style.height = 'auto';
     userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+    if (inputStatus) {
+        inputStatus.textContent = 'Typing...';
+        inputStatus.className = 'hint-right saving';
+        clearTimeout(window._saveDraftTimer);
+        window._saveDraftTimer = setTimeout(() => {
+            inputStatus.textContent = 'Draft saved';
+            inputStatus.className = 'hint-right saved';
+            setTimeout(() => { if (inputStatus) inputStatus.textContent = ''; }, 2000);
+        }, 1000);
+    }
 });
 
 userInput.addEventListener('keydown', (e) => {
@@ -144,12 +257,30 @@ userInput.addEventListener('keydown', (e) => {
         e.preventDefault();
         sendMessage();
     }
+    if (e.key === '/' && document.activeElement !== userInput && !palette.classList.contains('open')) {
+        e.preventDefault();
+        userInput.focus();
+    }
 });
 
 document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'l') {
         e.preventDefault();
         clearChat();
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        openCommandPalette();
+    }
+    if (e.key === 'Escape') {
+        closeCommandPalette();
+        closeShortcuts();
+    }
+    if (!palette.classList.contains('open') && !document.querySelector('.modal.open')) {
+        if (['1','2','3','4'].includes(e.key)) {
+            const tabs = ['chat','settings','teach','review'];
+            switchTab(tabs[parseInt(e.key) - 1]);
+        }
     }
 });
 
@@ -165,19 +296,286 @@ decSearch.addEventListener('input', () => filterDecisions());
 behSearch.addEventListener('input', () => filterBehaviors());
 authSearch.addEventListener('input', () => filterAuthority());
 
-// === VOICE MESSAGE: Hold-to-Record (existing) ===
+// Speed slider
+if (cfgVoiceSpeed) {
+    cfgVoiceSpeed.addEventListener('input', (e) => {
+        document.getElementById('speedValue').textContent = e.target.value + 'x';
+    });
+}
+
+// === SCROLL OBSERVER ===
+let isNearBottom = true;
+chatBox.addEventListener('scroll', () => {
+    const threshold = 100;
+    isNearBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < threshold;
+    if (scrollToBottomBtn) {
+        scrollToBottomBtn.classList.toggle('hidden', isNearBottom);
+    }
+});
+
+function scrollChatToBottom() {
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+// === CANVAS VISUALIZERS ===
+function drawVoiceWaveform(canvas, intensity = 0.5, color = 'var(--primary)') {
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const bars = 30;
+    const barWidth = width / bars - 2;
+    
+    ctx.clearRect(0, 0, width, height);
+    
+    for (let i = 0; i < bars; i++) {
+        const h = Math.random() * height * intensity + 4;
+        const x = i * (barWidth + 2);
+        const y = (height - h) / 2;
+        
+        const gradient = ctx.createLinearGradient(0, y, 0, y + h);
+        gradient.addColorStop(0, 'rgba(0, 217, 163, 0.1)');
+        gradient.addColorStop(0.5, 'rgba(0, 217, 163, 0.6)');
+        gradient.addColorStop(1, 'rgba(0, 217, 163, 0.1)');
+        
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.roundRect(x, y, barWidth, h, 2);
+        ctx.fill();
+    }
+}
+
+function startVoiceVisualizer() {
+    voiceCanvas.classList.remove('hidden');
+    function animate() {
+        if (!isRecording) {
+            voiceCanvas.classList.add('hidden');
+            return;
+        }
+        drawVoiceWaveform(voiceCanvas, 0.7);
+        voiceAnimFrame = requestAnimationFrame(animate);
+    }
+    animate();
+}
+
+function startCallVisualizer() {
+    callCanvas.classList.remove('hidden');
+    function animate() {
+        if (!callSession || !callSession.isActive) {
+            callCanvas.classList.add('hidden');
+            return;
+        }
+        const intensity = callSession.isAiSpeaking ? 0.6 : (callSession.isUserSpeaking ? 0.9 : 0.3);
+        const color = callSession.isAiSpeaking ? 'var(--primary)' : (callSession.isUserSpeaking ? 'var(--success)' : 'var(--text-dim)');
+        drawVoiceWaveform(callCanvas, intensity, color);
+        callAnimFrame = requestAnimationFrame(animate);
+    }
+    animate();
+}
+
+// === VOICE MESSAGE ===
 voiceBtn.addEventListener('mousedown', startRecording);
 voiceBtn.addEventListener('mouseup', stopRecording);
 voiceBtn.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
 voiceBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
 voiceBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
 
-// === VOICE CALL: Tap-to-Start (NEW) ===
-callBtn.addEventListener('click', toggleVoiceCall);
+async function audioBufferToRawPCM(audioBuffer, targetSampleRate = 16000) {
+    const numChannels = audioBuffer.numberOfChannels;
+    const originalRate = audioBuffer.sampleRate;
+    const duration = audioBuffer.duration;
+    const targetLength = Math.floor(duration * targetSampleRate);
+    const monoData = new Float32Array(targetLength);
 
-// =============================================================================
-// REAL-TIME VOICE CALL SESSION (NEW)
-// =============================================================================
+    for (let ch = 0; ch < numChannels; ch++) {
+        const channelData = audioBuffer.getChannelData(ch);
+        for (let i = 0; i < targetLength; i++) {
+            const srcIdx = (i / targetSampleRate) * originalRate;
+            const idx0 = Math.floor(srcIdx);
+            const idx1 = Math.min(idx0 + 1, channelData.length - 1);
+            const frac = srcIdx - idx0;
+            const sample = channelData[idx0] * (1 - frac) + channelData[idx1] * frac;
+            monoData[i] += sample / numChannels;
+        }
+    }
+
+    const int16Data = new Int16Array(targetLength);
+    for (let i = 0; i < targetLength; i++) {
+        let sample = monoData[i];
+        sample = Math.max(-1.0, Math.min(1.0, sample));
+        int16Data[i] = Math.round(sample * 32767);
+    }
+    return int16Data.buffer;
+}
+
+async function startRecording() {
+    if (isRecording) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+        showToast('Voice recording not supported in this browser', 'error');
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/ogg');
+
+        mediaRecorder = new MediaRecorder(stream, { mimeType });
+        audioChunks = [];
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+        mediaRecorder.onstop = async () => {
+            stream.getTracks().forEach(t => t.stop());
+            await processVoiceRecording(mimeType);
+        };
+        mediaRecorder.start(100);
+        isRecording = true;
+        recordingStartTime = Date.now();
+        voiceBtn.classList.add('recording');
+        startVoiceVisualizer();
+        recordingTimer = setInterval(() => {
+            const secs = Math.floor((Date.now() - recordingStartTime) / 1000);
+            voiceStatus.textContent = `${secs}s`;
+            if (secs > 60) stopRecording();
+        }, 500);
+    } catch (err) {
+        console.error('Mic error:', err);
+        showToast('Could not access microphone. Check permissions.', 'error');
+    }
+}
+
+function stopRecording() {
+    if (!isRecording || !mediaRecorder) return;
+    clearInterval(recordingTimer);
+    isRecording = false;
+    if (voiceAnimFrame) cancelAnimationFrame(voiceAnimFrame);
+    if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    voiceBtn.classList.remove('recording');
+    voiceStatus.textContent = '';
+}
+
+async function processVoiceRecording(mimeType) {
+    if (audioChunks.length === 0) {
+        showToast('No audio captured. Hold the button longer.', 'error');
+        return;
+    }
+    const audioBlob = new Blob(audioChunks, { type: mimeType });
+    if (audioBlob.size === 0) {
+        showToast('No audio captured. Hold the button longer.', 'error');
+        audioChunks = [];
+        return;
+    }
+    try {
+        await processVoiceViaWebSocket(audioBlob);
+    } catch (e) {
+        console.warn('STT WebSocket failed, falling back to HTTP:', e.message);
+        await processVoiceViaHTTP(audioBlob, mimeType);
+    }
+}
+
+async function processVoiceViaWebSocket(audioBlob) {
+    if (voiceLabel) voiceLabel.textContent = 'Converting audio...';
+    let audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const rawPCM = await audioBufferToRawPCM(audioBuffer, 16000);
+
+    voiceLabel.textContent = 'Transcribing via WebSocket...';
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/api/stt/`;
+
+    return new Promise((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+        const transcriptParts = [];
+        let wsReady = false;
+        let resolved = false;
+
+        ws.onopen = () => {
+            ws.send(JSON.stringify({
+                type: 'config', model: 'ink-whisper', language: 'en',
+                encoding: 'pcm_s16le', sample_rate: 16000
+            }));
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'ready') {
+                wsReady = true;
+                const chunkSize = 3200;
+                const uint8View = new Uint8Array(rawPCM);
+                (async () => {
+                    for (let i = 0; i < uint8View.length; i += chunkSize) {
+                        if (ws.readyState !== WebSocket.OPEN) break;
+                        ws.send(uint8View.slice(i, i + chunkSize));
+                        await new Promise(r => setTimeout(r, 10));
+                    }
+                    if (ws.readyState === WebSocket.OPEN) ws.send('finalize');
+                })();
+            } else if (data.type === 'transcript' && data.is_final && data.text) {
+                transcriptParts.push(data.text);
+            } else if (data.type === 'flush_done') {
+                if (!resolved) {
+                    resolved = true;
+                    ws.close();
+                    const transcript = transcriptParts.join(' ').trim();
+                    if (!transcript) {
+                        reject(new Error('No speech detected'));
+                    } else {
+                        userInput.value = transcript;
+                        userInput.style.height = 'auto';
+                        userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+                        voiceLabel.textContent = 'Hold to speak to DTOS';
+                        setTimeout(() => sendMessage(), 300);
+                        resolve(transcript);
+                    }
+                }
+            } else if (data.type === 'done') {
+                // Session close ack
+            } else if (data.type === 'error') {
+                if (!resolved) { resolved = true; ws.close(); reject(new Error(data.error)); }
+            }
+        };
+
+        ws.onerror = () => {
+            if (!resolved) { resolved = true; reject(new Error('WebSocket connection failed')); }
+        };
+
+        ws.onclose = () => {
+            if (!resolved) { resolved = true; reject(new Error('WebSocket closed unexpectedly')); }
+        };
+
+        setTimeout(() => {
+            if (!resolved) { resolved = true; ws.close(); reject(new Error('STT timeout')); }
+        }, 20000);
+    });
+}
+
+async function processVoiceViaHTTP(audioBlob, mimeType) {
+    voiceLabel.textContent = 'Transcribing voice input...';
+    voiceStatus.textContent = '';
+    const ext = mimeType.includes('webm') ? 'webm' : (mimeType.includes('mp4') ? 'm4a' : 'ogg');
+    const formData = new FormData();
+    formData.append('audio', audioBlob, `recording.${ext}`);
+    try {
+        const res = await fetch('/api/stt', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) { showToast(`STT Error: ${data.error}`, 'error'); voiceLabel.textContent = 'Hold to speak to DTOS'; return; }
+        const transcript = data.transcript?.trim();
+        if (!transcript) { showToast('No speech detected. Try again.', 'error'); voiceLabel.textContent = 'Hold to speak to DTOS'; return; }
+        userInput.value = transcript;
+        userInput.style.height = 'auto';
+        userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+        voiceLabel.textContent = 'Hold to speak to DTOS';
+        setTimeout(() => sendMessage(), 300);
+    } catch (e) {
+        console.error('STT fetch error:', e);
+        showToast('Transcription failed. Try again.', 'error');
+        voiceLabel.textContent = 'Hold to speak to DTOS';
+    } finally {
+        audioChunks = [];
+    }
+}
+
+// === VOICE CALL ===
+callBtn.addEventListener('click', toggleVoiceCall);
 
 class RealtimeCallSession {
     constructor() {
@@ -212,7 +610,6 @@ class RealtimeCallSession {
         this.nextPlayTime = 0;
         this.ttsSources = [];
         this.ttsInterrupted = false;
-        // NEW: separate mic context so STT gets true 16 kHz audio
         this.micAudioContext = null;
         this.micSource = null;
         this.micProcessor = null;
@@ -231,10 +628,7 @@ class RealtimeCallSession {
                 }
             });
             
-            // TTS playback at 24 kHz (matches Cartesia output)
             this.audioContext = new AudioContext({ sampleRate: 24000 });
-            
-            // NEW: Mic capture at 16 kHz (matches STT expectation)
             this.micAudioContext = new AudioContext({ sampleRate: 16000 });
             
             await this.connectSTT();
@@ -245,10 +639,9 @@ class RealtimeCallSession {
             this.startCallTimer();
             this.showTranscriptOverlay();
             callBtn.classList.add('active');
-            callLabel.textContent = 'End Call';
-            callWave.classList.remove('hidden');
-            callStatus.textContent = 'Listening... Speak naturally';
-            showToast('Voice call started — speak naturally');
+            startCallVisualizer();
+            if (callStatus) callStatus.textContent = 'Listening... Speak naturally';
+            showToast('Voice call started — speak naturally', 'success');
         } catch (err) {
             console.error('Call start error:', err);
             showToast('Could not start voice call: ' + err.message, 'error');
@@ -259,14 +652,13 @@ class RealtimeCallSession {
     stop() {
         if (!this.isActive) return;
         this.isActive = false;
+        if (callAnimFrame) cancelAnimationFrame(callAnimFrame);
         this.cleanup();
         callBtn.classList.remove('active');
-        callLabel.textContent = 'Voice Call';
-        callWave.classList.add('hidden');
-        callStatus.textContent = 'Tap to start a real-time voice conversation';
+        if (callStatus) callStatus.textContent = 'Tap to start a real-time voice conversation';
         callTimer.classList.add('hidden');
         this.hideTranscriptOverlay();
-        showToast('Voice call ended');
+        showToast('Voice call ended', 'info');
     }
 
     cleanup() {
@@ -314,18 +706,13 @@ class RealtimeCallSession {
             const input = e.inputBuffer.getChannelData(0);
             const volume = this.calculateVolume(input);
 
-            // Barge-in: user spoke while AI is playing
             if (volume > this.vadThreshold && this.isAiSpeaking && this.bargeInEnabled) {
                 this.interruptAI();
                 return;
             }
 
-            // AI is speaking and user hasn't barged in — drop the frame
-            if (this.isAiSpeaking) {
-                return;
-            }
+            if (this.isAiSpeaking) return;
 
-            // Normal user speech
             if (volume > this.vadThreshold) {
                 if (!this.isUserSpeaking) {
                     this.isUserSpeaking = true;
@@ -354,9 +741,6 @@ class RealtimeCallSession {
         };
         
         this.micSource.connect(this.micProcessor);
-        
-        // FIX: ScriptProcessorNode MUST be connected to destination for onaudioprocess to fire.
-        // Use zero gain so the microphone doesn't play through the speakers (no echo/feedback).
         const zeroGain = this.micAudioContext.createGain();
         zeroGain.gain.value = 0;
         this.micProcessor.connect(zeroGain);
@@ -368,12 +752,7 @@ class RealtimeCallSession {
         for (let i = 0; i < buffer.length; i++) { 
             sum += buffer[i] * buffer[i]; 
         }
-        const volume = Math.sqrt(sum / buffer.length);
-        // DEBUG: Log volume levels
-        if (this.isAiSpeaking && volume > this.vadThreshold * 0.5) {
-            console.log(`[VAD] Volume: ${volume.toFixed(4)}, threshold: ${this.vadThreshold}, isAiSpeaking: ${this.isAiSpeaking}`);
-        }
-        return volume;
+        return Math.sqrt(sum / buffer.length);
     }
 
     floatToInt16(floatArray) {
@@ -389,7 +768,6 @@ class RealtimeCallSession {
         console.log('[Call] Barge-in detected');
         this.isAiSpeaking = false;
         
-        // Stop every scheduled TTS source
         this.ttsSources.forEach(s => { try { s.stop(); } catch(e) {} });
         this.ttsSources = [];
         this.nextPlayTime = 0;
@@ -406,7 +784,6 @@ class RealtimeCallSession {
         this.isFirstChunk = true;
         this.ttsInterrupted = true;
         
-        // Clear accumulated STT transcript from AI echo
         this.finalTranscript = '';
         this.interimTranscript = '';
         this.updateTranscriptOverlay('', false);
@@ -494,10 +871,7 @@ class RealtimeCallSession {
             };
             this.ttsWs.onmessage = async (event) => {
                 if (event.data instanceof Blob) {
-                    // Drop late chunks from cancelled generation
-                    if (this.ttsInterrupted) {
-                        return;
-                    }
+                    if (this.ttsInterrupted) return;
                     const arrayBuffer = await event.data.arrayBuffer();
                     this.scheduleAudioPlayback(arrayBuffer);
                     if (!this.isAiSpeaking) {
@@ -543,7 +917,7 @@ class RealtimeCallSession {
             setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('TTS timeout')); } }, 10000);
         });
     }
-    // FIX: Gapless audio scheduling using AudioContext clock
+
     scheduleAudioPlayback(arrayBuffer) {
         if (!this.audioContext || !this.isActive) return;
         if (this.audioContext.state === 'suspended') {
@@ -595,7 +969,7 @@ class RealtimeCallSession {
     async processUserTurn(text) {
         if (!text || !this.isActive) return;
         
-        this.ttsInterrupted = false;  // ← ADD THIS LINE at the top
+        this.ttsInterrupted = false;
         
         console.log('[Call] User turn:', text);
         this.updateCallStatus('DTOS is thinking...');
@@ -646,21 +1020,15 @@ class RealtimeCallSession {
         }
     }
 
-    // FIX: Complete rewrite of text streaming to TTS
-    // Key insight from Cartesia docs: "Streamed inputs should form a valid transcript when joined"
-    // We accumulate text and only send complete sentences, preserving exact spacing
     streamTextToTTS(textChunk) {
         if (!this.isActive || !this.ttsWs || this.ttsWs.readyState !== WebSocket.OPEN) return;
         if (!this.currentContextId) return;
 
         this.ttsTextBuffer += textChunk;
 
-        // Look for complete sentences (ending with . ! ? followed by space or end)
-        // We need to be careful not to split mid-word
         let buffer = this.ttsTextBuffer;
         let sentUpTo = 0;
 
-        // Find all sentence boundaries
         const sentenceEndRegex = /[.!?]+(?:\s+|$)/g;
         let match;
         let lastSentenceEnd = -1;
@@ -670,11 +1038,9 @@ class RealtimeCallSession {
         }
 
         if (lastSentenceEnd > 0) {
-            // We have at least one complete sentence
             const textToSend = buffer.substring(0, lastSentenceEnd);
             const remaining = buffer.substring(lastSentenceEnd);
 
-            // Send the complete text
             const payload = {
                 type: 'chunk',
                 context_id: this.currentContextId,
@@ -683,17 +1049,11 @@ class RealtimeCallSession {
                 voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
                 model_id: cfgCartesiaModel.value || 'sonic-3.5',
                 language: 'en',
-                max_buffer_delay_ms: 0  // FIX: 0 because we buffer client-side
+                max_buffer_delay_ms: 0
             };
 
             const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
             if (speed !== 1.0) payload.speed = speed;
-
-            console.log('[TTS] Sending chunk:', JSON.stringify({
-                text: textToSend.substring(0, 80) + (textToSend.length > 80 ? '...' : ''),
-                len: textToSend.length,
-                continue: true
-            }));
 
             this.ttsWs.send(JSON.stringify(payload));
             this.ttsTextBuffer = remaining;
@@ -714,12 +1074,6 @@ class RealtimeCallSession {
             };
             const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
             if (speed !== 1.0) payload.speed = speed;
-
-            console.log('[TTS] Flushing final chunk:', JSON.stringify({
-                text: this.ttsTextBuffer.substring(0, 80) + (this.ttsTextBuffer.length > 80 ? '...' : ''),
-                len: this.ttsTextBuffer.length,
-                continue: false
-            }));
 
             this.ttsWs.send(JSON.stringify(payload));
             this.ttsTextBuffer = '';
@@ -756,7 +1110,6 @@ class RealtimeCallSession {
     }
 }
 
-// Toggle voice call on/off
 async function toggleVoiceCall() {
     if (callSession && callSession.isActive) {
         callSession.stop();
@@ -767,10 +1120,7 @@ async function toggleVoiceCall() {
     }
 }
 
-// =============================================================================
-// API & CONFIG
-// =============================================================================
-
+// === API & CONFIG ===
 async function loadConfig() {
     try {
         const res = await fetch('/api/config');
@@ -789,6 +1139,7 @@ async function loadConfig() {
         cfgVoiceId.value = config.cartesia_voice_id || 'e07c00bc-4134-4eae-9ea4-1a55fb45746b';
         cfgCartesiaModel.value = config.cartesia_model || 'sonic-3.5';
         cfgVoiceSpeed.value = config.cartesia_speed || '1.0';
+        document.getElementById('speedValue').textContent = (config.cartesia_speed || '1.0') + 'x';
 
         if (config.vad_sensitivity) cfgVadSensitivity.value = config.vad_sensitivity;
         if (config.silence_timeout) cfgSilenceTimeout.value = config.silence_timeout;
@@ -822,12 +1173,16 @@ async function saveConfig() {
     saveConfigBtn.innerHTML = '<span class="spinner"></span> Saving...';
     try {
         await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
-        saveConfigBtn.innerHTML = 'Saved!';
-        showToast('Governance configuration saved successfully');
-        setTimeout(() => { saveConfigBtn.innerHTML = 'Save Configuration'; saveConfigBtn.disabled = false; }, 1500);
+        saveConfigBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Saved!';
+        showToast('Governance configuration saved successfully', 'success');
+        setTimeout(() => { 
+            saveConfigBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg> Save Configuration'; 
+            saveConfigBtn.disabled = false; 
+        }, 2000);
     } catch (e) {
         saveConfigBtn.innerHTML = 'Error';
         saveConfigBtn.disabled = false;
+        showToast('Failed to save configuration', 'error');
     }
 }
 
@@ -851,213 +1206,7 @@ function updateBadge(count) {
     reviewBadge.classList.toggle('hidden', count === 0);
 }
 
-// =============================================================================
-// VOICE MESSAGE: Hold-to-Record (existing — unchanged functionality)
-// =============================================================================
-
-async function audioBufferToRawPCM(audioBuffer, targetSampleRate = 16000) {
-    const numChannels = audioBuffer.numberOfChannels;
-    const originalRate = audioBuffer.sampleRate;
-    const duration = audioBuffer.duration;
-    const targetLength = Math.floor(duration * targetSampleRate);
-    const monoData = new Float32Array(targetLength);
-
-    for (let ch = 0; ch < numChannels; ch++) {
-        const channelData = audioBuffer.getChannelData(ch);
-        for (let i = 0; i < targetLength; i++) {
-            const srcIdx = (i / targetSampleRate) * originalRate;
-            const idx0 = Math.floor(srcIdx);
-            const idx1 = Math.min(idx0 + 1, channelData.length - 1);
-            const frac = srcIdx - idx0;
-            const sample = channelData[idx0] * (1 - frac) + channelData[idx1] * frac;
-            monoData[i] += sample / numChannels;
-        }
-    }
-
-    const int16Data = new Int16Array(targetLength);
-    for (let i = 0; i < targetLength; i++) {
-        let sample = monoData[i];
-        sample = Math.max(-1.0, Math.min(1.0, sample));
-        int16Data[i] = Math.round(sample * 32767);
-    }
-    return int16Data.buffer;
-}
-
-async function startRecording() {
-    if (isRecording) return;
-    if (!navigator.mediaDevices || !window.MediaRecorder) {
-        showToast('Voice recording not supported in this browser', 'error');
-        return;
-    }
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm')
-            ? 'audio/webm'
-            : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/ogg');
-
-        mediaRecorder = new MediaRecorder(stream, { mimeType });
-        audioChunks = [];
-        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
-        mediaRecorder.onstop = async () => {
-            stream.getTracks().forEach(t => t.stop());
-            await processVoiceRecording(mimeType);
-        };
-        mediaRecorder.start(100);
-        isRecording = true;
-        recordingStartTime = Date.now();
-        voiceBtn.classList.add('recording');
-        voiceWave.classList.remove('hidden');
-        voiceLabel.textContent = 'Recording voice input...';
-        recordingTimer = setInterval(() => {
-            const secs = Math.floor((Date.now() - recordingStartTime) / 1000);
-            voiceStatus.textContent = `${secs}s`;
-            if (secs > 60) stopRecording();
-        }, 500);
-    } catch (err) {
-        console.error('Mic error:', err);
-        showToast('Could not access microphone. Check permissions.', 'error');
-    }
-}
-
-function stopRecording() {
-    if (!isRecording || !mediaRecorder) return;
-    clearInterval(recordingTimer);
-    isRecording = false;
-    if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-    voiceBtn.classList.remove('recording');
-    voiceWave.classList.add('hidden');
-    voiceLabel.textContent = 'Processing voice input...';
-    voiceStatus.textContent = '';
-}
-
-async function processVoiceRecording(mimeType) {
-    if (audioChunks.length === 0) {
-        showToast('No audio captured. Hold the button longer.', 'error');
-        voiceLabel.textContent = 'Hold to speak to DTOS';
-        return;
-    }
-    const audioBlob = new Blob(audioChunks, { type: mimeType });
-    if (audioBlob.size === 0) {
-        showToast('No audio captured. Hold the button longer.', 'error');
-        voiceLabel.textContent = 'Hold to speak to DTOS';
-        audioChunks = [];
-        return;
-    }
-    try {
-        await processVoiceViaWebSocket(audioBlob);
-    } catch (e) {
-        console.warn('STT WebSocket failed, falling back to HTTP:', e.message);
-        await processVoiceViaHTTP(audioBlob, mimeType);
-    }
-}
-
-async function processVoiceViaWebSocket(audioBlob) {
-    voiceLabel.textContent = 'Converting audio...';
-    let audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    const rawPCM = await audioBufferToRawPCM(audioBuffer, 16000);
-
-    voiceLabel.textContent = 'Transcribing via WebSocket...';
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/api/stt/`;
-
-    return new Promise((resolve, reject) => {
-        const ws = new WebSocket(wsUrl);
-        const transcriptParts = [];
-        let wsReady = false;
-        let resolved = false;
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({
-                type: 'config', model: 'ink-whisper', language: 'en',
-                encoding: 'pcm_s16le', sample_rate: 16000
-            }));
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'ready') {
-                wsReady = true;
-                const chunkSize = 3200;
-                const uint8View = new Uint8Array(rawPCM);
-                (async () => {
-                    for (let i = 0; i < uint8View.length; i += chunkSize) {
-                        if (ws.readyState !== WebSocket.OPEN) break;
-                        ws.send(uint8View.slice(i, i + chunkSize));
-                        await new Promise(r => setTimeout(r, 10));
-                    }
-                    if (ws.readyState === WebSocket.OPEN) ws.send('finalize');
-                })();
-            } else if (data.type === 'transcript' && data.is_final && data.text) {
-                transcriptParts.push(data.text);
-            } else if (data.type === 'flush_done') {
-                if (!resolved) {
-                    resolved = true;
-                    ws.close();
-                    const transcript = transcriptParts.join(' ').trim();
-                    if (!transcript) {
-                        reject(new Error('No speech detected'));
-                    } else {
-                        userInput.value = transcript;
-                        userInput.style.height = 'auto';
-                        userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
-                        voiceLabel.textContent = 'Hold to speak to DTOS';
-                        setTimeout(() => sendMessage(), 300);
-                        resolve(transcript);
-                    }
-                }
-            } else if (data.type === 'done') {
-                // Session close ack, ignore if already resolved
-            } else if (data.type === 'error') {
-                if (!resolved) { resolved = true; ws.close(); reject(new Error(data.error)); }
-            }
-        };
-
-        ws.onerror = () => {
-            if (!resolved) { resolved = true; reject(new Error('WebSocket connection failed')); }
-        };
-
-        ws.onclose = () => {
-            if (!resolved) { resolved = true; reject(new Error('WebSocket closed unexpectedly')); }
-        };
-
-        setTimeout(() => {
-            if (!resolved) { resolved = true; ws.close(); reject(new Error('STT timeout')); }
-        }, 20000);
-    });
-}
-
-async function processVoiceViaHTTP(audioBlob, mimeType) {
-    voiceLabel.textContent = 'Transcribing voice input...';
-    voiceStatus.textContent = '';
-    const ext = mimeType.includes('webm') ? 'webm' : (mimeType.includes('mp4') ? 'm4a' : 'ogg');
-    const formData = new FormData();
-    formData.append('audio', audioBlob, `recording.${ext}`);
-    try {
-        const res = await fetch('/api/stt', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.error) { showToast(`STT Error: ${data.error}`, 'error'); voiceLabel.textContent = 'Hold to speak to DTOS'; return; }
-        const transcript = data.transcript?.trim();
-        if (!transcript) { showToast('No speech detected. Try again.', 'error'); voiceLabel.textContent = 'Hold to speak to DTOS'; return; }
-        userInput.value = transcript;
-        userInput.style.height = 'auto';
-        userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
-        voiceLabel.textContent = 'Hold to speak to DTOS';
-        setTimeout(() => sendMessage(), 300);
-    } catch (e) {
-        console.error('STT fetch error:', e);
-        showToast('Transcription failed. Try again.', 'error');
-        voiceLabel.textContent = 'Hold to speak to DTOS';
-    } finally {
-        audioChunks = [];
-    }
-}
-
-// =============================================================================
-// TTS PLAYBACK for chat messages (existing — simplified, no WebSocket TTS)
-// =============================================================================
-
+// === TTS PLAYBACK ===
 async function playTTS(text, btnElement) {
     if (btnElement.classList.contains('playing')) {
         if (window._ttsAudio) {
@@ -1090,19 +1239,35 @@ async function playTTS(text, btnElement) {
     }
 }
 
-// =============================================================================
-// CHAT
-// =============================================================================
-
+// === CHAT ===
 function appendMessage(role, text, analysis = null) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
+    
+    const time = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const sender = role === 'assistant' ? 'DTOS' : 'You';
+    
+    if (role === 'assistant') {
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar dtos-avatar';
+        avatar.innerHTML = '<div class="avatar-inner">🤖</div><div class="avatar-ring"></div>';
+        div.appendChild(avatar);
+    } else {
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.textContent = 'You';
+        div.appendChild(avatar);
+    }
+    
+    const content = document.createElement('div');
+    content.className = 'message-content';
+    
     if (analysis && role === 'assistant') {
         const bar = document.createElement('div');
         bar.className = 'analysis-bar';
         if (analysis.situations_detected?.length > 0) {
             const s = document.createElement('span'); s.className = 'analysis-badge ab-info';
-            s.textContent = `📍 Situations: ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
+            s.textContent = `📍 ${analysis.situations_detected.join(', ')}`; bar.appendChild(s);
         }
         if (analysis.has_forbidden) {
             const a = document.createElement('span'); a.className = 'analysis-badge ab-danger';
@@ -1116,49 +1281,68 @@ function appendMessage(role, text, analysis = null) {
         }
         if (analysis.decisions_retrieved > 0) {
             const d = document.createElement('span'); d.className = 'analysis-badge ab-ok';
-            d.textContent = `📚 ${analysis.decisions_retrieved} decision patterns`; bar.appendChild(d);
+            d.textContent = `📚 ${analysis.decisions_retrieved} patterns`; bar.appendChild(d);
         }
         if (analysis.behaviors_applied > 0) {
             const b = document.createElement('span'); b.className = 'analysis-badge ab-ok';
-            b.textContent = `🎭 ${analysis.behaviors_applied} persona styles`; bar.appendChild(b);
+            b.textContent = `🎭 ${analysis.behaviors_applied} styles`; bar.appendChild(b);
         }
-        div.appendChild(bar);
+        content.appendChild(bar);
+        
         if (analysis.suggest_flag) {
             const banner = document.createElement('div');
             banner.className = 'flag-banner';
             banner.innerHTML = `<span>⚠️ This response may need audit review. Confidence is low or authority is conditional.</span><button onclick="manualFlag()">Flag for Audit</button>`;
-            div.appendChild(banner);
+            content.appendChild(banner);
         }
     }
+    
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     if (role === 'assistant') {
         bubble.innerHTML = formatText(escapeHtml(text));
         const ttsBtn = document.createElement('button');
         ttsBtn.className = 'tts-btn';
-        ttsBtn.title = 'Read aloud via voice engine';
+        ttsBtn.title = 'Read aloud';
         ttsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
         ttsBtn.onclick = () => playTTS(text, ttsBtn);
         bubble.appendChild(ttsBtn);
         const copyBtn = document.createElement('button');
         copyBtn.className = 'copy-btn';
         copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-        copyBtn.title = 'Copy response to clipboard';
-        copyBtn.onclick = () => { navigator.clipboard.writeText(text); showToast('Copied to clipboard'); };
+        copyBtn.title = 'Copy response';
+        copyBtn.onclick = () => { navigator.clipboard.writeText(text); showToast('Copied to clipboard', 'success'); };
         bubble.appendChild(copyBtn);
     } else {
         bubble.textContent = text;
     }
-    div.appendChild(bubble);
+    content.appendChild(bubble);
+    
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = `${sender} · ${time}`;
+    content.appendChild(meta);
+    
+    div.appendChild(content);
     chatBox.appendChild(div);
-    chatBox.scrollTop = chatBox.scrollHeight;
+    
+    if (isNearBottom) {
+        chatBox.scrollTop = chatBox.scrollHeight;
+    } else {
+        scrollToBottomBtn.classList.remove('hidden');
+    }
 }
 
 function showTyping() {
     const div = document.createElement('div');
     div.className = 'message assistant typing';
     div.id = 'typingIndicator';
-    div.innerHTML = '<div class="bubble"><span></span><span></span><span></span></div>';
+    div.innerHTML = `
+        <div class="avatar dtos-avatar"><div class="avatar-inner">🤖</div><div class="avatar-ring"></div></div>
+        <div class="message-content">
+            <div class="bubble"><span></span><span></span><span></span></div>
+        </div>
+    `;
     chatBox.appendChild(div);
     chatBox.scrollTop = chatBox.scrollHeight;
 }
@@ -1190,14 +1374,13 @@ async function sendMessage() {
         } else {
             lastAiResponse = data.reply;
             appendMessage('assistant', data.reply, data);
-            // NEW: Render thoughts panel
             if (data.thoughts) {
                 renderThoughts(data.thoughts);
             }
         }
     } catch (e) {
         hideTyping();
-        appendMessage('assistant', 'Network error...');
+        appendMessage('assistant', 'Network error. Please try again.');
     } finally {
         sendBtn.disabled = false; userInput.focus();
     }
@@ -1207,13 +1390,11 @@ function renderThoughts(thoughts) {
     const container = document.getElementById('thoughtsBody');
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
     
-    // Determine confidence styling
     const score = thoughts.confidence_score || 75;
     const confClass = score >= 80 ? 'high' : score >= 50 ? 'med' : 'low';
     const confFill = score >= 80 ? 'fill-high' : score >= 50 ? 'fill-med' : 'fill-low';
     const confColor = score >= 80 ? 'conf-high' : score >= 50 ? 'conf-med' : 'conf-low';
     
-    // Authority status with detailed breakdown
     let authHtml = '';
     if (thoughts.has_forbidden) {
         const forbiddenRules = (thoughts.authority_violations || []).filter(v => v.allowed === 'no');
@@ -1248,7 +1429,6 @@ function renderThoughts(thoughts) {
         authHtml = `<div class="auth-status auth-cleared">🛡️ Authority Cleared — No violations</div>`;
     }
     
-    // Situation tags with descriptions
     const situationDescriptions = {
         'high_stakes_meeting': 'Formal tone + evidence required',
         'governance_risk': 'Stricter governance checks',
@@ -1269,7 +1449,6 @@ function renderThoughts(thoughts) {
         return `<span class="sit-tag ${cls}" title="${escapeHtml(desc)}">${s}</span>`;
     }).join('');
     
-    // Confidence breakdown
     const breakdown = thoughts.confidence_breakdown || {};
     const breakdownHtml = `
         <div class="confidence-breakdown">
@@ -1282,7 +1461,6 @@ function renderThoughts(thoughts) {
         </div>
     `;
     
-    // Pipeline stages
     const stages = thoughts.pipeline_stages || {};
     const stagesHtml = Object.entries(stages).map(([key, val]) => {
         const statusIcon = val.status === 'completed' ? '✓' : '○';
@@ -1306,7 +1484,6 @@ function renderThoughts(thoughts) {
         `;
     }).join('');
     
-    // References
     const refsHtml = (thoughts.references || []).map(ref => {
         const icons = { decision: '📊', authority: '🛡️', behavior: '🎭' };
         const typeClass = ref.type === 'authority' && ref.allowed === 'no' ? 'ref-forbidden' : 
@@ -1321,7 +1498,6 @@ function renderThoughts(thoughts) {
         </div>`;
     }).join('');
     
-    // Reasoning trace (collapsible)
     const traceHtml = thoughts.reasoning_trace ? `
         <div class="trace-section">
             <div class="trace-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
@@ -1368,14 +1544,11 @@ function renderThoughts(thoughts) {
         </div>
     `;
     
-    // Remove empty state if present
     const empty = container.querySelector('.empty-thoughts');
     if (empty) empty.remove();
     
-    // Remove 'active' from previous cards
     container.querySelectorAll('.thought-card').forEach(c => c.classList.remove('active'));
-    
-    container.prepend(card); // Newest first
+    container.prepend(card);
 }
 
 function quickAsk(text) {
@@ -1391,39 +1564,44 @@ async function clearChat() {
     } catch (error) { console.warn('Failed to clear session on server:', error); }
     chatBox.innerHTML = `
         <div class="message assistant welcome">
-            <div class="bubble">
-                <div class="bubble-title">Welcome to DTOS</div>
-                <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
-                <div class="quick-pills">
-                    <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">Board meeting prep</button>
-                    <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">Authority boundary</button>
-                    <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">Persona switch</button>
+            <div class="avatar dtos-avatar">
+                <div class="avatar-inner">🤖</div>
+                <div class="avatar-ring"></div>
+            </div>
+            <div class="message-content">
+                <div class="bubble">
+                    <div class="bubble-title">Welcome to DTOS</div>
+                    <p>I am your Digital Twin Operating System. Describe any meeting, governance scenario, or advisory situation and I will respond using evidence-grounded reasoning, governance controls, and your configured authority boundaries.</p>
+                    <div class="quick-pills">
+                        <button class="quick-pill" onclick="quickAsk('I have a high-stakes board meeting tomorrow. What governance checks should I run?')">
+                            <span class="pill-icon">📋</span>
+                            <span>Board meeting prep</span>
+                        </button>
+                        <button class="quick-pill" onclick="quickAsk('A stakeholder is asking me to sign a financial commitment. What is my authority?')">
+                            <span class="pill-icon">🛡️</span>
+                            <span>Authority boundary</span>
+                        </button>
+                        <button class="quick-pill" onclick="quickAsk('I need to switch to a more formal persona for an investor call. How should I adapt?')">
+                            <span class="pill-icon">🎭</span>
+                            <span>Persona switch</span>
+                        </button>
+                    </div>
                 </div>
+                <div class="message-meta">DTOS · Just now</div>
             </div>
         </div>`;
     lastQuestion = ''; lastAiResponse = ''; lastContext = '';
+    showToast('Conversation cleared', 'info');
 }
 
-// =============================================================================
-// DECISIONS
-// =============================================================================
-
+// === DECISIONS ===
 async function loadDecisions(category = '') {
     try {
         decisionsList.innerHTML = renderSkeleton(3);
-        
-        const url = category 
-            ? `/api/decisions?category=${category}` 
-            : '/api/decisions';
-        
+        const url = category ? `/api/decisions?category=${category}` : '/api/decisions';
         const res = await fetch(url);
         const data = await res.json();
-        
-        // FIXED: Handle both plain array and wrapped response
         allDecisions = Array.isArray(data) ? data : (data.decisions || data.results || []);
-        
-        console.log(`Loaded ${allDecisions.length} decisions`, allDecisions); // Debug
-        
         filterDecisions();
     } catch (e) {
         console.error("Failed to load decisions:", e);
@@ -1499,30 +1677,25 @@ async function addDecision() {
         await fetch('/api/decisions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         decQuestion.value = ''; decContext.value = ''; decAnswer.value = ''; decReasoning.value = '';
         loadDecisions(decFilter.value); loadStats();
-        showToast('Governance decision pattern added');
-        addDecBtn.innerHTML = 'Add Decision Pattern'; addDecBtn.disabled = false;
-    } catch (e) { addDecBtn.innerHTML = 'Error'; addDecBtn.disabled = false; }
+        showToast('Governance decision pattern added', 'success');
+        addDecBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Add Decision Pattern'; 
+        addDecBtn.disabled = false;
+    } catch (e) {
+        addDecBtn.innerHTML = 'Error';
+        addDecBtn.disabled = false;
+    }
 }
 
 async function toggleDecision(id) { await fetch(`/api/decisions/${id}/toggle`, { method: 'POST' }); loadDecisions(decFilter.value); }
 async function deleteDecision(id) { if (!confirm('Delete this governance decision pattern?')) return; await fetch(`/api/decisions/${id}`, { method: 'DELETE' }); loadDecisions(decFilter.value); loadStats(); }
 
-// =============================================================================
-// BEHAVIORS
-// =============================================================================
-
+// === BEHAVIORS ===
 async function loadBehaviors() {
     try {
         behaviorsList.innerHTML = renderSkeleton(3);
-        
         const res = await fetch('/api/behaviors');
         const data = await res.json();
-        
-        // FIXED
         allBehaviors = Array.isArray(data) ? data : (data.behaviors || data.results || []);
-        
-        console.log(`✅ Loaded ${allBehaviors.length} behaviors`, allBehaviors);
-        
         filterBehaviors();
     } catch (e) {
         console.error("Failed to load behaviors:", e);
@@ -1588,30 +1761,25 @@ async function addBehavior() {
         await fetch('/api/behaviors', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         behSituation.value = ''; behTone.value = ''; behExample.value = ''; behDo.value = ''; behDont.value = '';
         loadBehaviors(); loadStats();
-        showToast('Persona behavior style added');
-        addBehBtn.innerHTML = 'Add Persona Behavior'; addBehBtn.disabled = false;
-    } catch (e) { addBehBtn.innerHTML = 'Error'; addBehBtn.disabled = false; }
+        showToast('Persona behavior style added', 'success');
+        addBehBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Add Persona Behavior'; 
+        addBehBtn.disabled = false;
+    } catch (e) {
+        addBehBtn.innerHTML = 'Error';
+        addBehBtn.disabled = false;
+    }
 }
 
 async function toggleBehavior(id) { await fetch(`/api/behaviors/${id}/toggle`, { method: 'POST' }); loadBehaviors(); }
 async function deleteBehavior(id) { if (!confirm('Delete this persona behavior?')) return; await fetch(`/api/behaviors/${id}`, { method: 'DELETE' }); loadBehaviors(); loadStats(); }
 
-// =============================================================================
-// AUTHORITY
-// =============================================================================
-
+// === AUTHORITY ===
 async function loadAuthority() {
     try {
         authorityList.innerHTML = renderSkeleton(3);
-        
         const res = await fetch('/api/authority');
         const data = await res.json();
-        
-        // FIXED
         allAuthority = Array.isArray(data) ? data : (data.rules || data.results || []);
-        
-        console.log(`✅ Loaded ${allAuthority.length} authority rules`, allAuthority);
-        
         filterAuthority();
     } catch (e) {
         console.error("Failed to load authority rules:", e);
@@ -1676,18 +1844,19 @@ async function addAuthority() {
         await fetch('/api/authority', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         authAction.value = ''; authCondition.value = ''; authFallback.value = '';
         loadAuthority(); loadStats();
-        showToast('Authority and safety rule added');
-        addAuthBtn.innerHTML = 'Add Authority & Safety Rule'; addAuthBtn.disabled = false;
-    } catch (e) { addAuthBtn.innerHTML = 'Error'; addAuthBtn.disabled = false; }
+        showToast('Authority and safety rule added', 'success');
+        addAuthBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Add Authority & Safety Rule'; 
+        addAuthBtn.disabled = false;
+    } catch (e) {
+        addAuthBtn.innerHTML = 'Error';
+        addAuthBtn.disabled = false;
+    }
 }
 
 async function toggleAuthority(id) { await fetch(`/api/authority/${id}/toggle`, { method: 'POST' }); loadAuthority(); }
 async function deleteAuthority(id) { if (!confirm('Delete this authority and safety rule?')) return; await fetch(`/api/authority/${id}`, { method: 'DELETE' }); loadAuthority(); loadStats(); }
 
-// =============================================================================
-// REVIEW / FLAGS
-// =============================================================================
-
+// === REVIEW / FLAGS ===
 async function loadFlags() {
     try {
         flagsList.innerHTML = renderSkeleton(2);
@@ -1753,16 +1922,16 @@ function toggleConvert(flagId, type) {
     let html = '';
     if (hasDec) {
         html += `<div class="convert-section-title">📊 Decision Fields</div>
-            <div class="form-row">
-                <div class="form-group third"><select id="cfDecCat-${flagId}"><option value="pricing">Pricing</option><option value="acquisition">Acquisition</option><option value="negotiation">Negotiation</option><option value="risk">Risk</option><option value="strategy">Strategy</option><option value="legal">Legal</option></select></div>
-                <div class="form-group third"><select id="cfDecAuth-${flagId}"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="forbidden">Forbidden</option></select></div>
-                <div class="form-group third"><select id="cfDecAct-${flagId}"><option value="buy">Buy</option><option value="reject">Reject</option><option value="negotiate">Negotiate</option><option value="escalate">Escalate</option><option value="delay">Delay</option><option value="conditional">Conditional</option></select></div>
+            <div class="form-row three-col">
+                <div class="form-group"><select id="cfDecCat-${flagId}"><option value="pricing">Pricing</option><option value="acquisition">Acquisition</option><option value="negotiation">Negotiation</option><option value="risk">Risk</option><option value="strategy">Strategy</option><option value="legal">Legal</option></select></div>
+                <div class="form-group"><select id="cfDecAuth-${flagId}"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="forbidden">Forbidden</option></select></div>
+                <div class="form-group"><select id="cfDecAct-${flagId}"><option value="buy">Buy</option><option value="reject">Reject</option><option value="negotiate">Negotiate</option><option value="escalate">Escalate</option><option value="delay">Delay</option><option value="conditional">Conditional</option></select></div>
             </div>
             <input type="text" id="cfDecCtx-${flagId}" placeholder="Context summary" value="From review panel">
             <input type="text" id="cfDecReason-${flagId}" placeholder="Reasoning summary" value="Admin-provided answer">`;
     }
     if (hasBeh) {
-        html += `<div class="convert-section-title" style="color:var(--info)">🎭 Behavior Fields</div>
+        html += `<div class="convert-section-title" style="color:var(--info-bright)">🎭 Behavior Fields</div>
             <input type="text" id="cfBehTone-${flagId}" placeholder="Tone (e.g., calm but firm)" value="professional">`;
     }
     if (hasAuth) {
@@ -1807,7 +1976,7 @@ async function resolveFlag(flagId) {
     }
     try {
         await fetch(`/api/flags/${flagId}/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        loadFlags(); loadStats(); showToast('Audit flag resolved and governance answer saved');
+        loadFlags(); loadStats(); showToast('Audit flag resolved and governance answer saved', 'success');
     } catch (e) { showToast('Failed to resolve', 'error'); }
 }
 
@@ -1824,14 +1993,11 @@ async function manualFlag() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId, question: lastQuestion, ai_response: lastAiResponse, context: lastContext, flag_reason: 'manual' })
         });
-        showToast('🚩 Flagged for audit review'); loadStats();
+        showToast('Flagged for audit review', 'warning'); loadStats();
     } catch (e) { showToast('Failed to flag for audit', 'error'); }
 }
 
-// =============================================================================
-// UTILS
-// =============================================================================
-
+// === UTILS ===
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -1844,8 +2010,10 @@ function formatText(text) {
         .replace(/__(.+?)__/g, '<strong>$1</strong>')
         .replace(/\*(.+?)\*/g, '<em>$1</em>')
         .replace(/_(.+?)_/g, '<em>$1</em>')
-        .replace(/^#{1,6}\s+(.+)$/gm, '<strong style="color:var(--primary);display:block;margin:12px 0 4px;">$1</strong>')
-        .replace(/^[-•]\s+(.+)$/gm, '<li style="margin-left:16px;margin-bottom:4px;">$1</li>')
+        .replace(/^#{1,6}\s+(.+)$/gm, '<strong style="color:var(--primary);display:block;margin:14px 0 6px;font-size:1.05rem;">$1</strong>')
+        .replace(/^[-•]\s+(.+)$/gm, '<li style="margin-left:20px;margin-bottom:6px;list-style:disc;">$1</li>')
+        .replace(/```([\s\S]*?)```/g, '<pre style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-xs);padding:14px;margin:12px 0;overflow:auto;font-family:SF Mono,monospace;font-size:0.85rem;line-height:1.6;"><code>$1</code></pre>')
+        .replace(/`([^`]+)`/g, '<code style="background:var(--bg-hover);padding:2px 6px;border-radius:4px;font-family:SF Mono,monospace;font-size:0.88em;color:var(--primary);">$1</code>')
         .replace(/\n/g, '<br>');
 }
 
@@ -1863,7 +2031,7 @@ function showToast(msg, type = 'success') {
     toast.className = `toast ${type}`;
     toast.textContent = msg;
     document.body.appendChild(toast);
-    setTimeout(() => { toast.classList.add('fade-out'); setTimeout(() => toast.remove(), 300); }, 3000);
+    setTimeout(() => { toast.classList.add('fade-out'); setTimeout(() => toast.remove(), 300); }, 4000);
 }
 
 function renderSkeleton(count) {
@@ -1876,5 +2044,38 @@ function renderSkeleton(count) {
     `).join('');
 }
 
-// Initial load
+// === VOICE TAB SWITCHING ===
+function switchVoiceTab(tab) {
+    // Update buttons
+    document.querySelectorAll('.voice-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.voiceTab === tab);
+    });
+    // Update content
+    document.querySelectorAll('.voice-tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === 'voice-tab-' + tab);
+    });
+}
+
+// === CONNECTION MONITORING ===
+function checkConnection() {
+    const status = document.getElementById('connectionStatus');
+    if (!status) return;
+    
+    fetch('/api/stats', { method: 'HEAD' })
+        .then(() => {
+            status.classList.remove('disconnected');
+            status.classList.add('connected');
+            status.querySelector('.status-text').textContent = 'System Online';
+        })
+        .catch(() => {
+            status.classList.remove('connected');
+            status.classList.add('disconnected');
+            status.querySelector('.status-text').textContent = 'Offline';
+        });
+}
+
+setInterval(checkConnection, 30000);
+checkConnection();
+
+// === INIT ===
 loadConfig(); loadStats(); loadDecisions(); loadBehaviors(); loadAuthority(); loadFlags();
