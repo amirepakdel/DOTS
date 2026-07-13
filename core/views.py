@@ -24,6 +24,16 @@ from .governance import *
 
 from django.conf import settings
 
+from .permissions import (
+    IsAdmin, IsGovernanceAdmin, IsFlagReviewer, IsChatOperator , IsModerator ,
+    IsAuditor, ReadOnly
+)
+
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.utils.decorators import method_decorator
+
+
 try:
     import websocket
     WEBSOCKET_CLIENT_AVAILABLE = True
@@ -39,11 +49,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class IndexView(TemplateView):
+class IndexView(LoginRequiredMixin,TemplateView):
     template_name = 'index.html'
 
 
 class HealthView(APIView):
+    permission_classes = [IsAdmin | ReadOnly]
     def get(self, request):
         return Response({
             "status": "ok",
@@ -52,6 +63,7 @@ class HealthView(APIView):
 
 
 class ConfigView(APIView):
+    permission_classes = [IsAdmin | IsGovernanceAdmin]
     def get(self, request):
         return Response(get_config())
 
@@ -66,6 +78,7 @@ class ConfigView(APIView):
 
 
 class DecisionViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdmin | IsGovernanceAdmin | IsAuditor]
     queryset = Decision.objects.all()
     serializer_class = DecisionSerializer
 
@@ -99,6 +112,7 @@ class DecisionViewSet(viewsets.ModelViewSet):
 
 
 class BehaviorViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdmin | IsGovernanceAdmin | IsAuditor]
     queryset = Behavior.objects.all()
     serializer_class = BehaviorSerializer
 
@@ -132,6 +146,7 @@ class BehaviorViewSet(viewsets.ModelViewSet):
 
 
 class AuthorityViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdmin | IsGovernanceAdmin | IsAuditor]
     queryset = AuthorityRule.objects.all()
     serializer_class = AuthorityRuleSerializer
 
@@ -165,6 +180,7 @@ class AuthorityViewSet(viewsets.ModelViewSet):
 
 
 class FlagViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdmin | IsFlagReviewer | IsModerator | IsAuditor]
     queryset = FlaggedQuestion.objects.all()
     serializer_class = FlaggedQuestionSerializer
 
@@ -276,6 +292,7 @@ class FlagViewSet(viewsets.ModelViewSet):
 # =============================================================================
 
 class ChatView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator | IsFlagReviewer]
     """Standard non-streaming chat with parallel governance & fast model routing."""
 
     def _calculate_confidence(self, violations, decisions, behaviors):
@@ -552,6 +569,7 @@ class ChatView(APIView):
 
 
 class ChatStreamView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator | IsFlagReviewer]
     """Streaming chat with parallel governance & early metadata emission."""
 
     def post(self, request):
@@ -764,6 +782,7 @@ class ChatStreamView(APIView):
 
 
 class HistoryView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator | IsAuditor]
     def get(self, request):
         session_id = request.query_params.get("session_id", "default")
         qs = Conversation.objects.filter(session_id=session_id).order_by('-created_at')[:50]
@@ -772,6 +791,7 @@ class HistoryView(APIView):
 
 
 class ClearView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator]
     def post(self, request):
         session_id = request.data.get("session_id", "default")
         Conversation.objects.filter(session_id=session_id).delete()
@@ -779,6 +799,7 @@ class ClearView(APIView):
 
 
 class StatsView(APIView):
+    permission_classes = [IsAdmin | IsAuditor | IsFlagReviewer]
     def get(self, request):
         stats = {
             'active_decisions': Decision.objects.filter(active=True).count(),
@@ -841,6 +862,7 @@ def raw_pcm_to_wav(raw_pcm_bytes, sample_rate=24000, channels=1, sample_width=2)
 # =============================================================================
 
 class STTView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator]
     def post(self, request):
         if 'audio' not in request.FILES:
             return Response({"error": "No audio file provided"}, status=400)
@@ -1012,6 +1034,7 @@ class STTView(APIView):
 # =============================================================================
 
 class TTSView(APIView):
+    permission_classes = [IsAdmin | IsChatOperator]
     def post(self, request):
         text = request.data.get("text", "").strip()
         if not text:

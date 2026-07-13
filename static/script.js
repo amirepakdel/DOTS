@@ -29,6 +29,119 @@ let touchStartX = 0;
 let touchStartY = 0;
 let isMobile = window.innerWidth <= 768;
 
+// === VOICE CALL VISUAL OVERLAY HELPERS ===
+const callVisualOverlay = document.getElementById('callVisualOverlay');
+const callOrb = document.getElementById('callOrb');
+const callVisualStatus = document.getElementById('callVisualStatus');
+const callVisualPill = document.getElementById('callVisualPill');
+const callVisualTranscriptText = document.getElementById('callVisualTranscriptText');
+const callVisualTimer = document.getElementById('callVisualTimer');
+const callWaveform = document.getElementById('callWaveform');
+
+// Generate waveform bars
+const WAVEFORM_BAR_COUNT = 32;
+if (callWaveform) {
+    for (let i = 0; i < WAVEFORM_BAR_COUNT; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'waveform-bar';
+        bar.style.setProperty('--i', i);
+        callWaveform.appendChild(bar);
+    }
+}
+
+function showCallVisual() {
+    if (callVisualOverlay) {
+        callVisualOverlay.classList.remove('hidden');
+        // Force reflow
+        void callVisualOverlay.offsetWidth;
+        callVisualOverlay.classList.add('open');
+    }
+    setCallVisualState('idle');
+    updateCallVisualStatus('Initializing...');
+}
+
+function hideCallVisual() {
+    if (callVisualOverlay) {
+        callVisualOverlay.classList.remove('open');
+        setTimeout(() => callVisualOverlay.classList.add('hidden'), 450);
+    }
+    // Reset waveform
+    document.querySelectorAll('.waveform-bar').forEach(bar => {
+        bar.style.height = '4px';
+        bar.style.opacity = '0.5';
+        bar.style.background = 'linear-gradient(to top, var(--primary), var(--info-bright))';
+    });
+    if (callOrb) callOrb.classList.remove('audio-active');
+}
+
+function setCallVisualState(state) {
+    if (callOrb) callOrb.setAttribute('data-state', state);
+    if (callVisualPill) {
+        callVisualPill.classList.remove('listening', 'speaking', 'thinking');
+        if (state !== 'idle') callVisualPill.classList.add(state);
+    }
+}
+
+function updateCallVisualStatus(status) {
+    if (callVisualStatus) callVisualStatus.textContent = status;
+}
+
+function updateCallVisualTranscript(text, isInterim) {
+    if (callVisualTranscriptText) {
+        callVisualTranscriptText.textContent = text || 'Say something...';
+        callVisualTranscriptText.classList.toggle('interim', isInterim);
+    }
+}
+
+function updateCallVisualTimer(text) {
+    if (callVisualTimer) callVisualTimer.textContent = text;
+}
+
+function updateWaveform(frequencyData, volume) {
+    const bars = document.querySelectorAll('.waveform-bar');
+    if (!bars.length) return;
+    const step = Math.floor(frequencyData.length / bars.length);
+
+    bars.forEach((bar, i) => {
+        const idx = Math.min(i * step, frequencyData.length - 1);
+        const value = frequencyData[idx] || 0;
+        const normalized = value / 255;
+        const height = Math.max(4, normalized * 54);
+        bar.style.height = height + 'px';
+        bar.style.opacity = 0.35 + normalized * 0.65;
+
+        if (normalized > 0.75) {
+            bar.style.background = 'linear-gradient(to top, var(--primary), var(--text-bright))';
+        } else if (normalized > 0.4) {
+            bar.style.background = 'linear-gradient(to top, var(--primary), var(--info-bright))';
+        } else {
+            bar.style.background = 'linear-gradient(to top, rgba(0,217,163,0.4), rgba(55,66,250,0.4))';
+        }
+    });
+
+    if (callOrb) {
+        const scale = 0.85 + volume * 0.45;
+        const ringScale = 1 + volume * 0.25;
+        const glowOpacity = 0.3 + volume * 0.55;
+        const glowScale = 0.9 + volume * 0.35;
+
+        callOrb.style.setProperty('--orb-scale', scale);
+        callOrb.style.setProperty('--ring1-scale', ringScale);
+        callOrb.style.setProperty('--ring2-scale', ringScale * 0.95);
+        callOrb.style.setProperty('--ring-opacity', 0.3 + volume * 0.6);
+        callOrb.style.setProperty('--glow-opacity', glowOpacity);
+        callOrb.style.setProperty('--glow-scale', glowScale);
+        callOrb.classList.toggle('audio-active', volume > 0.03);
+    }
+}
+
+function endVoiceCall() {
+    if (callSession && callSession.isActive) {
+        callSession.stop();
+        callSession = null;
+    }
+}
+
 // === DOM ===
 const navItems = document.querySelectorAll('.nav-item');
 const panels = document.querySelectorAll('.panel');
@@ -115,10 +228,10 @@ const paletteInput = document.getElementById('paletteInput');
 const paletteResults = document.getElementById('paletteResults');
 
 const COMMANDS = [
-    { id: 'chat', label: 'Chat', icon: '💬', shortcut: '1', action: () => switchTab('chat') },
-    { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: '2', action: () => switchTab('settings') },
-    { id: 'teach', label: 'Teaching', icon: '🎓', shortcut: '3', action: () => switchTab('teach') },
-    { id: 'review', label: 'Review', icon: '🚩', shortcut: '4', action: () => switchTab('review') },
+    { id: 'chat', label: 'Chat', icon: '💬', shortcut: 'f1', action: () => switchTab('chat') },
+    { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: 'f2', action: () => switchTab('settings') },
+    { id: 'teach', label: 'Teaching', icon: '🎓', shortcut: 'f3', action: () => switchTab('teach') },
+    { id: 'review', label: 'Review', icon: '🚩', shortcut: 'f4', action: () => switchTab('review') },
     { id: 'clear', label: 'Clear Chat', icon: '🗑️', shortcut: 'Ctrl+L', action: () => clearChat() },
     { id: 'flag', label: 'Flag for Audit', icon: '🚩', shortcut: '', action: () => manualFlag() },
     { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: '⌨️', shortcut: '', action: () => openShortcuts() },
@@ -336,9 +449,10 @@ document.addEventListener('keydown', (e) => {
         closeCommandPalette();
         closeShortcuts();
         closeMobileThoughts();
+        endVoiceCall();
     }
     if (!palette.classList.contains('open') && !document.querySelector('.modal.open')) {
-        if (['1','2','3','4'].includes(e.key)) {
+        if (['f1','f2','f3','f4'].includes(e.key)) {
             const tabs = ['chat','settings','teach','review'];
             switchTab(tabs[parseInt(e.key) - 1]);
         }
@@ -686,6 +800,9 @@ class RealtimeCallSession {
         this.micAudioContext = null;
         this.micSource = null;
         this.micProcessor = null;
+        this.analyser = null;
+        this.visualizerFrame = null;
+        this.frequencyData = null;
     }
 
     async start() {
@@ -703,6 +820,17 @@ class RealtimeCallSession {
             
             this.audioContext = new AudioContext({ sampleRate: 24000 });
             this.micAudioContext = new AudioContext({ sampleRate: 16000 });
+
+            // Analyser for TTS visualization (orb + waveform)
+            this.analyser = this.audioContext.createAnalyser();
+            this.analyser.fftSize = 128;
+            this.analyser.smoothingTimeConstant = 0.85;
+            this.frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
+            this.analyser.connect(this.audioContext.destination);
+
+            // Show Siri-style popup
+            showCallVisual();
+            updateCallVisualTimer('00:00');
             
             await this.connectSTT();
             await this.connectTTS();
@@ -713,6 +841,7 @@ class RealtimeCallSession {
             this.showTranscriptOverlay();
             callBtn.classList.add('active');
             startCallVisualizer();
+            this.startVisualizer();
             if (callStatus) callStatus.textContent = 'Listening... Speak naturally';
             showToast('Voice call started — speak naturally', 'success');
         } catch (err) {
@@ -726,6 +855,9 @@ class RealtimeCallSession {
         if (!this.isActive) return;
         this.isActive = false;
         if (callAnimFrame) cancelAnimationFrame(callAnimFrame);
+        if (this.visualizerFrame) cancelAnimationFrame(this.visualizerFrame);
+        this.visualizerFrame = null;
+        hideCallVisual();
         this.cleanup();
         callBtn.classList.remove('active');
         if (callStatus) callStatus.textContent = 'Tap to start a real-time voice conversation';
@@ -742,7 +874,7 @@ class RealtimeCallSession {
         if (this.processor) { try { this.processor.disconnect(); } catch(e) {} this.processor = null; }
         if (this.source) { try { this.source.disconnect(); } catch(e) {} this.source = null; }
         if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
-        if (this.audioContext) { try { this.audioContext.close(); } catch(e) {} this.audioContext = null; }
+        if (this.audioContext) { try { this.audioContext.close(); } catch(e) {} this.audioContext = null; this.analyser = null;this.frequencyData = null;}
         if (this.sttWs) { try { this.sttWs.close(); } catch(e) {} this.sttWs = null; }
         if (this.ttsWs) { try { this.ttsWs.close(); } catch(e) {} this.ttsWs = null; }
         this.ttsAudioQueue = [];
@@ -758,6 +890,22 @@ class RealtimeCallSession {
         this.nextPlayTime = 0;
         this.ttsSources = [];
         this.ttsInterrupted = false;
+        this.analyser = null;
+        this.frequencyData = null;
+    }
+
+    startVisualizer() {
+        if (!this.isActive || !this.analyser) return;
+        this.analyser.getByteFrequencyData(this.frequencyData);
+
+        let sum = 0;
+        for (let i = 0; i < this.frequencyData.length; i++) {
+            sum += this.frequencyData[i];
+        }
+        const volume = sum / this.frequencyData.length / 255;
+
+        updateWaveform(this.frequencyData, volume);
+        this.visualizerFrame = requestAnimationFrame(() => this.startVisualizer());
     }
 
     startCallTimer() {
@@ -766,7 +914,9 @@ class RealtimeCallSession {
             const elapsed = Math.floor((Date.now() - this.callStartTime) / 1000);
             const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
             const secs = String(elapsed % 60).padStart(2, '0');
-            callTimer.textContent = `${mins}:${secs}`;
+            const timeStr = `${mins}:${secs}`;
+            callTimer.textContent = timeStr;
+            updateCallVisualTimer(timeStr);
         }, 1000);
     }
 
@@ -937,8 +1087,8 @@ class RealtimeCallSession {
             this.ttsWs.onopen = () => {
                 this.ttsWs.send(JSON.stringify({
                     type: 'config',
-                    model_id: cfgCartesiaModel.value || 'sonic-3.5',
-                    voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                    model_id: 'sonic-3.5',
+                    voice_id: 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
                     language: 'en'
                 }));
             };
@@ -1010,7 +1160,7 @@ class RealtimeCallSession {
 
         const source = this.audioContext.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(this.audioContext.destination);
+        source.connect(this.analyser);
 
         const now = this.audioContext.currentTime;
         if (this.nextPlayTime <= now) {
@@ -1070,7 +1220,7 @@ class RealtimeCallSession {
                 if (done) break;
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-                buffer = lines.pop();
+                buffer = lines.pop(); // keep incomplete event in buffer
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         try {
@@ -1154,7 +1304,14 @@ class RealtimeCallSession {
     }
 
     updateCallStatus(status) {
-        callStatus.textContent = status;
+        if (callStatus) callStatus.textContent = status;
+        updateCallVisualStatus(status);
+
+        if (status.includes('speaking')) setCallVisualState('speaking');
+        else if (status.includes('listening') || status.includes('Speak')) setCallVisualState('listening');
+        else if (status.includes('thinking') || status.includes('Processing') || status.includes('DTOS is thinking')) setCallVisualState('thinking');
+        else if (status.includes('interrupted')) setCallVisualState('listening');
+        else if (status.includes('Error')) setCallVisualState('idle');
     }
 
     showTranscriptOverlay() {
@@ -1180,6 +1337,7 @@ class RealtimeCallSession {
             el.textContent = text || 'Say something...';
             el.classList.toggle('interim', isInterim);
         }
+        updateCallVisualTranscript(text, isInterim);
     }
 }
 
@@ -1198,27 +1356,46 @@ async function loadConfig() {
     try {
         const res = await fetch('/api/config');
         const config = await res.json();
-        cfgCompany.value = config.company_name || '';
-        cfgSystem.value = config.system_prompt || '';
-        cfgPersonality.value = config.personality || '';
-        cfgAllowed.value = config.allowed_topics || '';
-        cfgDenied.value = config.denied_topics || '';
-        cfgRules.value = config.response_rules || '';
-        cfgMargin.value = config.margin_threshold || '25';
-        cfgHistory.value = config.max_history || '10';
-        cfgTemp.value = config.temperature || '0.3';
-        cfgAutoFlagConditional.value = config.auto_flag_conditional || 'true';
-        cfgAutoFlagUncertain.value = config.auto_flag_uncertain || 'true';
-        cfgVoiceId.value = config.cartesia_voice_id || 'e07c00bc-4134-4eae-9ea4-1a55fb45746b';
-        cfgCartesiaModel.value = config.cartesia_model || 'sonic-3.5';
-        cfgVoiceSpeed.value = config.cartesia_speed || '1.0';
-        document.getElementById('speedValue').textContent = (config.cartesia_speed || '1.0') + 'x';
 
-        if (config.vad_sensitivity) cfgVadSensitivity.value = config.vad_sensitivity;
-        if (config.silence_timeout) cfgSilenceTimeout.value = config.silence_timeout;
-        if (config.barge_in) cfgBargeIn.value = config.barge_in;
-        if (config.tts_buffer_delay) cfgTtsBuffer.value = config.tts_buffer_delay;
-    } catch (e) { console.error(e); }
+        // Safe assignments - won't crash if element doesn't exist
+        cfgCompany && (cfgCompany.value = config.company_name || '');
+        cfgSystem && (cfgSystem.value = config.system_prompt || '');
+        cfgPersonality && (cfgPersonality.value = config.personality || '');
+        cfgAllowed && (cfgAllowed.value = config.allowed_topics || '');
+        cfgDenied && (cfgDenied.value = config.denied_topics || '');
+        cfgRules && (cfgRules.value = config.response_rules || '');
+        cfgMargin && (cfgMargin.value = config.margin_threshold || '25');
+        cfgHistory && (cfgHistory.value = config.max_history || '10');
+        cfgTemp && (cfgTemp.value = config.temperature || '0.3');
+        cfgAutoFlagConditional && (cfgAutoFlagConditional.value = config.auto_flag_conditional || 'true');
+        cfgAutoFlagUncertain && (cfgAutoFlagUncertain.value = config.auto_flag_uncertain || 'true');
+        cfgVoiceId && (cfgVoiceId.value = config.cartesia_voice_id || 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
+        cfgCartesiaModel && (cfgCartesiaModel.value = config.cartesia_model || 'sonic-3.5');
+        cfgVoiceSpeed && (cfgVoiceSpeed.value = config.cartesia_speed || '1.0');
+
+        // Special case for textContent
+        const speedValueEl = document.getElementById('speedValue');
+        if (speedValueEl) {
+            speedValueEl.textContent = (config.cartesia_speed || '1.0') + 'x';
+        }
+
+        // Optional fields with checks
+        if (config.vad_sensitivity && cfgVadSensitivity) {
+            cfgVadSensitivity.value = config.vad_sensitivity;
+        }
+        if (config.silence_timeout && cfgSilenceTimeout) {
+            cfgSilenceTimeout.value = config.silence_timeout;
+        }
+        if (config.barge_in !== undefined && cfgBargeIn) {
+            cfgBargeIn.value = config.barge_in;
+        }
+        if (config.tts_buffer_delay && cfgTtsBuffer) {
+            cfgTtsBuffer.value = config.tts_buffer_delay;
+        }
+
+    } catch (e) {
+        console.error('Failed to load config:', e);
+    }
 }
 
 async function saveConfig() {
@@ -1432,37 +1609,118 @@ function hideTyping() {
     if (el) el.remove();
 }
 
+// === STREAMING CHAT (word-by-word) ===
 async function sendMessage() {
     const text = userInput.value.trim();
     if (!text) return;
+
     lastQuestion = text;
     appendMessage('user', text);
-    userInput.value = ''; userInput.style.height = 'auto';
-    sendBtn.disabled = true; showTyping();
-    
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    sendBtn.disabled = true;
+
+    // Build the live streaming bubble
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message assistant';
+    wrapper.id = 'streamingMsg';
+    wrapper.innerHTML = `
+        <div class="avatar dtos-avatar">
+            <div class="avatar-inner">🤖</div>
+            <div class="avatar-ring"></div>
+        </div>
+        <div class="message-content">
+            <div class="bubble">
+                <span class="stream-body"></span><span class="cursor">▋</span>
+            </div>
+            <div class="message-meta">DTOS · Generating…</div>
+        </div>
+    `;
+    chatBox.appendChild(wrapper);
+    const body = wrapper.querySelector('.stream-body');
+    const meta = wrapper.querySelector('.message-meta');
+
+    let fullText = '';
+    let wordBuffer = [];
+    let isStreamDone = false;
+    let thoughts = null;
+
+    // Word-by-word drain loop — runs every 20 ms
+    const renderInterval = setInterval(() => {
+        if (wordBuffer.length > 0) {
+            // Adaptive batch: 1 word if buffer is small, up to 3 if backlog grows
+            const batchSize = wordBuffer.length > 12 ? 3 : (wordBuffer.length > 4 ? 2 : 1);
+            const batch = wordBuffer.splice(0, batchSize);
+            fullText += batch.join('');
+            body.textContent = fullText;
+            if (isNearBottom) chatBox.scrollTop = chatBox.scrollHeight;
+        } else if (isStreamDone) {
+            clearInterval(renderInterval);
+            wrapper.remove();
+            lastAiResponse = fullText;
+            if (thoughts) {
+                appendMessage('assistant', fullText, thoughts);
+                renderThoughts(thoughts);
+            } else {
+                appendMessage('assistant', fullText);
+            }
+            sendBtn.disabled = false;
+            userInput.focus();
+        }
+    }, 100);
+
     try {
-        const res = await fetch('/api/chat', {
+        const res = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text, session_id: sessionId, use_kb: useKb.checked })
         });
-        const data = await res.json();
-        hideTyping();
-        
-        if (data.error) {
-            appendMessage('assistant', 'Error: ' + data.error);
-        } else {
-            lastAiResponse = data.reply;
-            appendMessage('assistant', data.reply, data);
-            if (data.thoughts) {
-                renderThoughts(data.thoughts);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                isStreamDone = true;
+                break;
+            }
+
+            sseBuffer += decoder.decode(value, { stream: true });
+            const events = sseBuffer.split('\n\n');
+            sseBuffer = events.pop(); // keep incomplete event in buffer
+
+            for (const event of events) {
+                const lines = event.split('\n');
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const chunk = JSON.parse(line.slice(6));
+
+                        if (chunk.type === 'meta') continue;
+
+                        if (chunk.text) {
+                            // Tokenise by words while preserving trailing spaces
+                            const words = chunk.text.match(/\S+\s*/g) || [];
+                            if (words.length) wordBuffer.push(...words);
+                        }
+
+                        if (chunk.done && chunk.thoughts) {
+                            thoughts = chunk.thoughts;
+                        }
+                    } catch (e) {
+                        // ignore malformed SSE lines
+                    }
+                }
             }
         }
-    } catch (e) {
-        hideTyping();
+    } catch (err) {
+        clearInterval(renderInterval);
+        wrapper.remove();
         appendMessage('assistant', 'Network error. Please try again.');
-    } finally {
-        sendBtn.disabled = false; userInput.focus();
+        sendBtn.disabled = false;
+        userInput.focus();
     }
 }
 
@@ -2153,6 +2411,32 @@ function checkConnection() {
             status.classList.add('disconnected');
             status.querySelector('.status-text').textContent = 'Offline';
         });
+}
+
+// === STREAMING CHAT ===
+function createStreamingMessage() {
+    const div = document.createElement('div');
+    div.className = 'message assistant';
+    div.id = 'streamingMessage';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar dtos-avatar';
+    avatar.innerHTML = '<div class="avatar-inner">🤖</div><div class="avatar-ring"></div>';
+    div.appendChild(avatar);
+
+    const content = document.createElement('div');
+    content.className = 'message-content';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = '<span style="opacity:0.5;">Thinking…</span>';
+    content.appendChild(bubble);
+
+    div.appendChild(content);
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+
+    return { div, bubble };
 }
 
 // === RESIZE HANDLER ===

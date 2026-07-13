@@ -48,10 +48,10 @@
                 <div class="shortcut-row"><kbd>Ctrl</kbd><kbd>L</kbd><span>Clear Conversation</span></div>
                 <div class="shortcut-row"><kbd>Enter</kbd><span>Send Message</span></div>
                 <div class="shortcut-row"><kbd>Shift</kbd><kbd>Enter</kbd><span>New Line</span></div>
-                <div class="shortcut-row"><kbd>1</kbd><span>Chat Panel</span></div>
-                <div class="shortcut-row"><kbd>2</kbd><span>Settings Panel</span></div>
-                <div class="shortcut-row"><kbd>3</kbd><span>Teaching Panel</span></div>
-                <div class="shortcut-row"><kbd>4</kbd><span>Review Panel</span></div>
+                <div class="shortcut-row"><kbd>f1</kbd><span>Chat Panel</span></div>
+                <div class="shortcut-row"><kbd>f2</kbd><span>Settings Panel</span></div>
+                <div class="shortcut-row"><kbd>f3</kbd><span>Teaching Panel</span></div>
+                <div class="shortcut-row"><kbd>f4</kbd><span>Review Panel</span></div>
                 <div class="shortcut-row"><kbd>Esc</kbd><span>Close Modals / Cancel</span></div>
                 <div class="shortcut-row"><kbd>/</kbd><span>Focus Chat Input</span></div>
             </div>
@@ -76,6 +76,54 @@
                     <div class="empty-title">Awaiting Input</div>
                     <div class="empty-desc">Agent reasoning, confidence scores and knowledge base references will appear here once you start a conversation.</div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Siri-like Voice Call Visual Overlay -->
+    <div id="callVisualOverlay" class="call-visual-overlay hidden">
+        <div class="call-visual-backdrop" onclick="endVoiceCall()"></div>
+        <div class="call-visual-container">
+            <button class="call-visual-close" onclick="endVoiceCall()" aria-label="End call">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+
+            <div class="call-visual-header">
+                <div class="call-visual-pill" id="callVisualPill">
+                    <span class="call-visual-dot" id="callVisualDot"></span>
+                    <span class="call-visual-status" id="callVisualStatus">Ready</span>
+                </div>
+            </div>
+
+            <div class="call-orb-wrapper">
+                <div class="call-orb" id="callOrb" data-state="idle">
+                    <div class="orb-core"></div>
+                    <div class="orb-ring orb-ring-1"></div>
+                    <div class="orb-ring orb-ring-2"></div>
+                    <div class="orb-ring orb-ring-3"></div>
+                    <div class="orb-glow"></div>
+                    <div class="orb-reflection"></div>
+                </div>
+            </div>
+
+            <div class="call-waveform" id="callWaveform"></div>
+
+            <div class="call-visual-transcript">
+                <span class="transcript-label">Live Transcript</span>
+                <div class="transcript-text interim" id="callVisualTranscriptText">Say something...</div>
+            </div>
+
+            <div class="call-visual-footer">
+                <div class="call-visual-timer" id="callVisualTimer">00:00</div>
+                <button class="call-end-btn" onclick="endVoiceCall()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                    </svg>
+                    End Call
+                </button>
             </div>
         </div>
     </div>
@@ -264,9 +312,9 @@
                                     <span>Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+L</kbd> to clear</span>
                                     <span class="hint-right" id="inputStatus"></span>
                                 </div>
-                                <div class="voice-options compact">
+                                <div class="voice-options compact hidden">
                                     <canvas id="voiceCanvas" class="voice-canvas hidden" width="120" height="32"></canvas>
-                                    <span id="voiceStatus" class="voice-status"></span>
+                                    <span id="voiceStatus" class="voice-status hidden"></span>
                                     <span id="voiceLabel" class="voice-label hidden">Hold to speak to DTOS</span>
                                     
                                     <canvas id="callCanvas" class="call-canvas hidden" width="120" height="32"></canvas>
@@ -408,7 +456,7 @@
                         </div>
                     </div>
 
-                    <div class="settings-card wide">
+                    <!-- <div class="settings-card wide">
                         <div class="card-header">
                             <span class="card-icon">⚡</span>
                             <h3>AI Engine & Safety Controls</h3>
@@ -520,7 +568,7 @@
                                 <span class="field-hint">Allow interrupting the AI while it's speaking</span>
                             </div>
                         </div>
-                    </div>
+                    </div> -->
                     <div class="settings-card wide save-card">
                         <button id="saveConfigBtn" class="btn-primary full save-btn">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>

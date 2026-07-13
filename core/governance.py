@@ -32,10 +32,10 @@ llm_openai_fast = ChatOpenAI(
 )
 
 llm_anthropic = ChatAnthropic(
-    model="claude-sonnet-5",
+    model="claude-haiku-4-5",
     temperature=None,
-    max_tokens=4096,
-    anthropic_api_key=settings.ANTHROPIC_API_KEY,
+    max_tokens=2048,
+    anthropic_api_key=settings.ANTHROPIC_API_KEY
 )
 
 llm = llm_anthropic if settings.ANTHROPIC_API_KEY else llm_openai

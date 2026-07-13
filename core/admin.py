@@ -1,5 +1,8 @@
 from django.contrib import admin
 from .models import *
+from django.contrib.auth.models import Group, User
+from django.contrib.auth.admin import GroupAdmin, UserAdmin
+from django import forms
 
 @admin.register(BotConfig)
 class BotConfigAdmin(admin.ModelAdmin):
@@ -60,3 +63,40 @@ class ConversationAdmin(admin.ModelAdmin):
     def content_preview(self, obj):
         return obj.content[:120] if obj.content else '-'
     content_preview.short_description = 'Content'
+
+
+# Unregister default so we can customize
+admin.site.unregister(Group)
+admin.site.unregister(User)
+
+
+class CustomGroupAdminForm(forms.ModelForm):
+    class Meta:
+        model = Group
+        fields = "__all__"
+        widgets = {
+            'permissions': forms.SelectMultiple(attrs={'size': '20', 'style': 'width: 60%;'})
+        }
+
+
+@admin.register(Group)
+class CustomGroupAdmin(GroupAdmin):
+    form = CustomGroupAdminForm
+    list_display = ('name', 'user_count')
+    search_fields = ('name',)
+    filter_horizontal = ('permissions',)
+
+    def user_count(self, obj):
+        return obj.user_set.count()
+    user_count.short_description = "Users"
+
+
+@admin.register(User)
+class CustomUserAdmin(UserAdmin):
+    list_display = ('username', 'email', 'first_name', 'last_name', 'is_staff', 'group_list', 'is_active')
+    list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
+    list_editable = ('is_active',)
+
+    def group_list(self, obj):
+        return ", ".join(g.name for g in obj.groups.all()) or "-"
+    group_list.short_description = "Groups"
