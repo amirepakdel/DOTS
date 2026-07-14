@@ -7,6 +7,7 @@
     <title>DTOS — Digital Twin Operating System</title>
     <link rel="stylesheet" href="{% static 'style.css' %}">
     <base target="_blank">
+<base target="_blank">
 </head>
 <body>
     <!-- Ambient Background -->
@@ -124,6 +125,45 @@
                     </svg>
                     End Call
                 </button>
+            </div>
+        </div>
+    </div>
+
+    
+    <!-- Tavus CVI Video Call Modal -->
+    <div id="tavusModal" class="modal tavus-modal">
+        <div class="modal-backdrop" onclick="closeTavusModal()"></div>
+        <div class="modal-content tavus-modal-content">
+            <div class="modal-header">
+                <div class="tavus-header-left">
+                    <h3>🎥 Video Call with DTOS</h3>
+                    <span class="tavus-subtitle">Powered by Tavus CVI — Real-time AI Avatar</span>
+                </div>
+                <button class="modal-close" onclick="closeTavusModal()" aria-label="Close video call">✕</button>
+            </div>
+            <div class="tavus-body">
+                <div id="tavusLoading" class="tavus-loading">
+                    <div class="tavus-spinner"></div>
+                    <p>Initializing avatar session...</p>
+                    <span class="tavus-loading-hint">Connecting to Tavus CVI</span>
+                </div>
+                <div id="tavusError" class="tavus-error hidden">
+                    <div class="tavus-error-icon">⚠️</div>
+                    <p id="tavusErrorText">Failed to start video call</p>
+                    <button class="btn-primary" onclick="startTavusCall()">Retry</button>
+                </div>
+                <div id="tavusVideoContainer" class="tavus-video-container hidden">
+                    <iframe id="tavusIframe" allow="camera; microphone; autoplay; display-capture" frameborder="0"></iframe>
+                </div>
+                <div id="tavusControls" class="tavus-controls hidden">
+                    <button id="tavusEndBtn" class="tavus-end-btn" onclick="endTavusCall()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                        </svg>
+                        End Call
+                    </button>
+                    <div class="tavus-status" id="tavusStatus">Connected</div>
+                </div>
             </div>
         </div>
     </div>
@@ -303,6 +343,12 @@
                                     </button>
                                     <button id="callBtn" class="call-btn compact-btn" title="Start real-time voice call" aria-label="Start voice call">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
+                                    </button>
+                                    <button id="tavusBtn" class="tavus-btn compact-btn" title="Start video call with AI Avatar" aria-label="Start video call with AI Avatar">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M23 7l-7 5 7 5V7z"></path>
+                                            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                                        </svg>
                                     </button>
                                     <button id="sendBtn" class="btn-primary" title="Send (Enter)" aria-label="Send message">
                                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>

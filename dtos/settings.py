@@ -17,6 +17,10 @@ STATIC_ROOT = os.getenv('STATIC_ROOT', BASE_DIR / 'staticfiles')
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://su.forclosure.ai"
+]
+
 INSTALLED_APPS = [
     'daphne',
     'django.contrib.admin',
@@ -137,3 +141,13 @@ LOGGING = {
         'core': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
     },
 }
+
+TAVUS_API_KEY = "58b7edfe949d46199ac990d2d091c4c2"
+TAVUS_FACE_ID = "re3fd4adeafd"
+TAVUS_PAL_ID = "p9b7ab8db1c6"
+
+TAVUS_CUSTOM_LLM_SECRET = os.getenv("TAVUS_CUSTOM_LLM_SECRET", "change-me-in-production")
+
+# Cartesia (existing)
+CARTESIA_VOICE_ID = os.getenv("CARTESIA_VOICE_ID", "a5136bf9-224c-4d76-b823-52bd5efcffcc")
+CARTESIA_MODEL = os.getenv("CARTESIA_MODEL", "sonic-3.5")

@@ -19,5 +19,15 @@ urlpatterns = [
     path('api/stats', views.StatsView.as_view(), name='stats'),
     path('api/stt', views.STTView.as_view(), name='stt'),
     path('api/tts', views.TTSView.as_view(), name='tts'),
+    # Tavus CVI endpoints
+    path('api/tavus/conversation', views.TavusConversationView.as_view(), name='tavus-conversation'),
+    path('api/tavus/conversation/end', views.TavusEndConversationView.as_view(), name='tavus-end-conversation'),
+
+    path('api/tavus/llm/', views.TavusLLMCallbackView.as_view(), name='tavus-llm-callback'),
+    path('api/tavus/llm/chat/completions', views.TavusLLMCallbackView.as_view(), name='tavus-llm-chat'),
+
+    path('api/tavus/webhook/', views.TavusWebhookView.as_view(), name='tavus-webhook'),
+    path('api/tavus/debug/', views.TavusLLMDebugView.as_view(), name='tavus-llm-debug'),
+
     path('api/', include(router.urls)),
 ]

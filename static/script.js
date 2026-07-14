@@ -24,6 +24,10 @@ let voiceAnimFrame = null;
 let callSession = null;
 let callAnimFrame = null;
 
+// === TAVUS CVI STATE ===
+let tavusSession = null;
+let tavusConversationId = null;
+
 // === MOBILE STATE ===
 let touchStartX = 0;
 let touchStartY = 0;
@@ -136,7 +140,7 @@ function updateWaveform(frequencyData, volume) {
 }
 
 function endVoiceCall() {
-    if (callSession && callSession.isActive) {
+    if (callSession && (callSession.isActive || callSession.isInitializing)) {
         callSession.stop();
         callSession = null;
     }
@@ -764,6 +768,7 @@ async function processVoiceViaHTTP(audioBlob, mimeType) {
 // === VOICE CALL ===
 callBtn.addEventListener('click', toggleVoiceCall);
 
+
 class RealtimeCallSession {
     constructor() {
         this.audioContext = null;
@@ -773,6 +778,7 @@ class RealtimeCallSession {
         this.sttWs = null;
         this.ttsWs = null;
         this.isActive = false;
+        this.isInitializing = false;
         this.isUserSpeaking = false;
         this.isAiSpeaking = false;
         this.ttsAudioQueue = [];
@@ -806,7 +812,8 @@ class RealtimeCallSession {
     }
 
     async start() {
-        if (this.isActive) return;
+        if (this.isInitializing || this.isActive) return;
+        this.isInitializing = true;
         try {
             this.mediaStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
@@ -821,14 +828,12 @@ class RealtimeCallSession {
             this.audioContext = new AudioContext({ sampleRate: 24000 });
             this.micAudioContext = new AudioContext({ sampleRate: 16000 });
 
-            // Analyser for TTS visualization (orb + waveform)
             this.analyser = this.audioContext.createAnalyser();
             this.analyser.fftSize = 128;
             this.analyser.smoothingTimeConstant = 0.85;
             this.frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
             this.analyser.connect(this.audioContext.destination);
 
-            // Show Siri-style popup
             showCallVisual();
             updateCallVisualTimer('00:00');
             
@@ -836,6 +841,7 @@ class RealtimeCallSession {
             await this.connectTTS();
             this.startVAD();
             this.isActive = true;
+            this.isInitializing = false;
             this.callStartTime = Date.now();
             this.startCallTimer();
             this.showTranscriptOverlay();
@@ -846,14 +852,16 @@ class RealtimeCallSession {
             showToast('Voice call started — speak naturally', 'success');
         } catch (err) {
             console.error('Call start error:', err);
+            this.isInitializing = false;
             showToast('Could not start voice call: ' + err.message, 'error');
             this.cleanup();
         }
     }
 
     stop() {
-        if (!this.isActive) return;
+        if (!this.isActive && !this.isInitializing) return;
         this.isActive = false;
+        this.isInitializing = false;
         if (callAnimFrame) cancelAnimationFrame(callAnimFrame);
         if (this.visualizerFrame) cancelAnimationFrame(this.visualizerFrame);
         this.visualizerFrame = null;
@@ -1201,7 +1209,12 @@ class RealtimeCallSession {
         try {
             const response = await fetch('/api/chat/stream', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: "include",
+                headers: { 
+                    'Content-Type': 'application/json',
+                    "X-CSRFToken": getCookie("csrftoken")
+
+                 },
                 body: JSON.stringify({
                     message: text,
                     session_id: sessionId,
@@ -1220,7 +1233,7 @@ class RealtimeCallSession {
                 if (done) break;
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-                buffer = lines.pop(); // keep incomplete event in buffer
+                buffer = lines.pop();
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         try {
@@ -1269,8 +1282,8 @@ class RealtimeCallSession {
                 context_id: this.currentContextId,
                 text: textToSend,
                 continue: true,
-                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
-                model_id: cfgCartesiaModel.value || 'sonic-3.5',
+                voice_id: 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                model_id: 'sonic-3.5',
                 language: 'en',
                 max_buffer_delay_ms: 0
             };
@@ -1290,12 +1303,12 @@ class RealtimeCallSession {
                 context_id: this.currentContextId,
                 text: this.ttsTextBuffer,
                 continue: false,
-                voice_id: cfgVoiceId.value || 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
-                model_id: cfgCartesiaModel.value || 'sonic-3.5',
+                voice_id: 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+                model_id: 'sonic-3.5',
                 language: 'en',
                 max_buffer_delay_ms: 0
             };
-            const speed = parseFloat(cfgVoiceSpeed.value || '1.0');
+            const speed = parseFloat('1.0');
             if (speed !== 1.0) payload.speed = speed;
 
             this.ttsWs.send(JSON.stringify(payload));
@@ -1342,7 +1355,7 @@ class RealtimeCallSession {
 }
 
 async function toggleVoiceCall() {
-    if (callSession && callSession.isActive) {
+    if (callSession && (callSession.isActive || callSession.isInitializing)) {
         callSession.stop();
         callSession = null;
     } else {
@@ -1350,6 +1363,136 @@ async function toggleVoiceCall() {
         await callSession.start();
     }
 }
+
+// === TAVUS CVI VIDEO CALL ===
+const tavusModal = document.getElementById('tavusModal');
+const tavusIframe = document.getElementById('tavusIframe');
+const tavusLoading = document.getElementById('tavusLoading');
+const tavusError = document.getElementById('tavusError');
+const tavusErrorText = document.getElementById('tavusErrorText');
+const tavusVideoContainer = document.getElementById('tavusVideoContainer');
+const tavusControls = document.getElementById('tavusControls');
+const tavusStatus = document.getElementById('tavusStatus');
+const tavusBtn = document.getElementById('tavusBtn');
+
+function openTavusModal() {
+    if (tavusModal) {
+        tavusModal.classList.add('open');
+        startTavusCall();
+    }
+}
+
+function closeTavusModal() {
+    if (tavusModal) {
+        tavusModal.classList.remove('open');
+        endTavusCall();
+    }
+}
+
+async function startTavusCall() {
+    if (tavusSession) return;
+
+    // Reset UI
+    tavusLoading.classList.remove('hidden');
+    tavusError.classList.add('hidden');
+    tavusVideoContainer.classList.add('hidden');
+    tavusControls.classList.add('hidden');
+    if (tavusBtn) tavusBtn.classList.add('active');
+
+    try {
+        const res = await fetch('/api/tavus/conversation', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({})
+        });
+
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || err.details?.detail || 'Failed to create conversation');
+        }
+
+        const data = await res.json();
+        tavusConversationId = data.conversation_id;
+
+        // Load the Tavus video into iframe
+        tavusIframe.src = data.conversation_url;
+
+        // Show video
+        tavusLoading.classList.add('hidden');
+        tavusVideoContainer.classList.remove('hidden');
+        tavusControls.classList.remove('hidden');
+
+        tavusSession = {
+            conversationId: data.conversation_id,
+            conversationUrl: data.conversation_url,
+            startTime: Date.now()
+        };
+
+        showToast('Avatar video call started', 'success');
+
+    } catch (err) {
+        console.error('[Tavus] Start call error:', err);
+        tavusLoading.classList.add('hidden');
+        tavusError.classList.remove('hidden');
+        tavusErrorText.textContent = err.message || 'Failed to start video call. Check your Tavus configuration.';
+        if (tavusBtn) tavusBtn.classList.remove('active');
+    }
+}
+
+async function endTavusCall() {
+    if (!tavusSession) return;
+
+    // End the conversation on Tavus
+    if (tavusConversationId) {
+        try {
+            await fetch('/api/tavus/conversation/end', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: JSON.stringify({ conversation_id: tavusConversationId })
+            });
+        } catch (e) {
+            console.warn('[Tavus] End conversation API call failed:', e);
+        }
+    }
+
+    // Clean up
+    tavusIframe.src = '';
+    tavusVideoContainer.classList.add('hidden');
+    tavusControls.classList.add('hidden');
+    if (tavusBtn) tavusBtn.classList.remove('active');
+
+    tavusSession = null;
+    tavusConversationId = null;
+
+    showToast('Video call ended', 'info');
+}
+
+// Tavus button event listener
+if (tavusBtn) {
+    tavusBtn.addEventListener('click', () => {
+        if (tavusSession) {
+            closeTavusModal();
+        } else {
+            openTavusModal();
+        }
+    });
+}
+
+// Close Tavus modal on Escape
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && tavusModal && tavusModal.classList.contains('open')) {
+        closeTavusModal();
+    }
+});
+
 
 // === API & CONFIG ===
 async function loadConfig() {
@@ -1372,6 +1515,12 @@ async function loadConfig() {
         cfgVoiceId && (cfgVoiceId.value = config.cartesia_voice_id || 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
         cfgCartesiaModel && (cfgCartesiaModel.value = config.cartesia_model || 'sonic-3.5');
         cfgVoiceSpeed && (cfgVoiceSpeed.value = config.cartesia_speed || '1.0');
+
+        // Tavus config (if elements exist)
+        const cfgTavusFaceId = document.getElementById('cfgTavusFaceId');
+        const cfgTavusPalId = document.getElementById('cfgTavusPalId');
+        if (cfgTavusFaceId) cfgTavusFaceId.value = config.tavus_face_id || '';
+        if (cfgTavusPalId) cfgTavusPalId.value = config.tavus_pal_id || '';
 
         // Special case for textContent
         const speedValueEl = document.getElementById('speedValue');
@@ -1609,6 +1758,27 @@ function hideTyping() {
     if (el) el.remove();
 }
 
+function getCookie(name) {
+    let cookieValue = null;
+
+    if (document.cookie && document.cookie !== "") {
+        const cookies = document.cookie.split(";");
+
+        for (let cookie of cookies) {
+            cookie = cookie.trim();
+
+            if (cookie.startsWith(name + "=")) {
+                cookieValue = decodeURIComponent(
+                    cookie.substring(name.length + 1)
+                );
+                break;
+            }
+        }
+    }
+
+    return cookieValue;
+}
+
 // === STREAMING CHAT (word-by-word) ===
 async function sendMessage() {
     const text = userInput.value.trim();
@@ -1672,7 +1842,12 @@ async function sendMessage() {
     try {
         const res = await fetch('/api/chat/stream', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            credentials: "include",
+            headers: { 
+                'Content-Type': 'application/json',
+                "X-CSRFToken": getCookie("csrftoken")
+
+            },
             body: JSON.stringify({ message: text, session_id: sessionId, use_kb: useKb.checked })
         });
 

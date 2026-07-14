@@ -4675,3 +4675,225 @@ textarea { resize: vertical; min-height: 64px; }
         font-size: 1rem;
     }
 }
+/* ============================================
+   TAVUS CVI VIDEO CALL MODAL
+   ============================================ */
+
+.tavus-modal .modal-content {
+    max-width: 900px;
+    width: 90%;
+    max-height: 85vh;
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.tavus-header-left {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tavus-subtitle {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.tavus-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    min-height: 400px;
+    background: var(--bg-elevated);
+}
+
+.tavus-loading {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 60px 40px;
+    text-align: center;
+}
+
+.tavus-spinner {
+    width: 56px;
+    height: 56px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.tavus-loading p {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-bright);
+}
+
+.tavus-loading-hint {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+
+.tavus-error {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 60px 40px;
+    text-align: center;
+}
+
+.tavus-error-icon {
+    font-size: 3rem;
+}
+
+.tavus-error p {
+    font-size: 1rem;
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.tavus-video-container {
+    flex: 1;
+    position: relative;
+    background: #000;
+    min-height: 400px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tavus-video-container iframe {
+    width: 100%;
+    height: 100%;
+    min-height: 400px;
+    border: none;
+    border-radius: 0;
+}
+
+.tavus-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    background: var(--glass-bg);
+    backdrop-filter: blur(20px);
+    border-top: 1px solid var(--glass-border);
+    gap: 16px;
+}
+
+.tavus-end-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 28px;
+    background: linear-gradient(135deg, var(--danger) 0%, var(--danger-dim) 100%);
+    border: none;
+    color: white;
+    font-size: 0.95rem;
+    font-weight: 700;
+    font-family: inherit;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: var(--transition-spring);
+    box-shadow: 0 4px 20px var(--danger-glow);
+}
+
+.tavus-end-btn:hover {
+    transform: translateY(-2px) scale(1.03);
+    box-shadow: 0 8px 28px rgba(255, 71, 87, 0.35);
+}
+
+.tavus-status {
+    font-size: 0.85rem;
+    color: var(--success);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tavus-status::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: var(--success);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--success);
+    animation: pulse 2s ease-in-out infinite;
+}
+
+/* Tavus Button in Chat Input */
+.tavus-btn {
+    background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
+    border: none;
+    color: white;
+    box-shadow: 0 2px 12px rgba(124, 58, 237, 0.25);
+}
+
+.tavus-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 20px rgba(124, 58, 237, 0.4);
+}
+
+.tavus-btn.active {
+    animation: tavusPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes tavusPulse {
+    0%, 100% { box-shadow: 0 2px 12px rgba(124, 58, 237, 0.25); }
+    50% { box-shadow: 0 2px 20px rgba(124, 58, 237, 0.45); }
+}
+
+/* Mobile Tavus */
+@media (max-width: 768px) {
+    .tavus-modal .modal-content {
+        max-width: 100%;
+        width: 100%;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+    }
+
+    .tavus-body {
+        min-height: 60vh;
+    }
+
+    .tavus-video-container {
+        min-height: 60vh;
+    }
+
+    .tavus-video-container iframe {
+        min-height: 60vh;
+    }
+
+    .tavus-controls {
+        padding: 14px 16px;
+    }
+
+    .tavus-end-btn {
+        padding: 14px 24px;
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+@media (max-width: 480px) {
+    .tavus-loading,
+    .tavus-error {
+        padding: 40px 20px;
+    }
+
+    .tavus-video-container iframe {
+        min-height: 50vh;
+    }
+}

@@ -7,8 +7,7 @@ import threading
 import tempfile
 import os
 import time
-import struct
-import io
+import traceback
 
 from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -56,9 +55,17 @@ class IndexView(LoginRequiredMixin,TemplateView):
 class HealthView(APIView):
     permission_classes = [IsAdmin | ReadOnly]
     def get(self, request):
+        tavus_configured = bool(getattr(settings, 'TAVUS_API_KEY', ''))
+        custom_llm_url = request.build_absolute_uri('/api/tavus/llm/').replace('http:', 'https:')
         return Response({
             "status": "ok",
-            "pending_flags": get_pending_count()
+            "pending_flags": get_pending_count(),
+            "tavus": {
+                "configured": tavus_configured,
+                "face_id": bool(getattr(settings, 'TAVUS_FACE_ID', '')),
+                "pal_id": bool(getattr(settings, 'TAVUS_PAL_ID', '')),
+                "custom_llm_callback": custom_llm_url
+            }
         })
 
 
@@ -180,7 +187,7 @@ class AuthorityViewSet(viewsets.ModelViewSet):
 
 
 class FlagViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdmin | IsFlagReviewer | IsModerator | IsAuditor]
+    permission_classes = [IsAdmin | IsFlagReviewer | IsModerator |IsAuditor]
     queryset = FlaggedQuestion.objects.all()
     serializer_class = FlaggedQuestionSerializer
 
@@ -418,30 +425,30 @@ class ChatView(APIView):
         result = self._process_chat(user_message, session_id, use_kb)
         return Response(result)
 
-    def _process_chat(self, user_message, session_id, use_kb):
+    def _process_chat(self, user_message, session_id, use_kb, skip_db_history=False, external_history=None):
         config = get_config()
         situations = detect_situation(user_message)
         violations = check_authority(user_message)
         has_forbidden = any(v['allowed'] == 'no' for v in violations)
         has_conditional = any(v['allowed'] == 'conditional' for v in violations)
 
-        save_message(session_id, "user", user_message)
+        if not skip_db_history:
+            save_message(session_id, "user", user_message)
 
-        # Determine model tier before any heavy lifting
         complexity = estimate_complexity(user_message, situations, violations)
 
-        # Parallel fetch of KB + history (skip if forbidden or KB disabled)
         decisions, behaviors, authority_docs, history = [], [], [], []
         if use_kb and not has_forbidden:
             try:
-                decisions, behaviors, authority_docs, history = fetch_kb_parallel(
+                decisions, behaviors, authority_docs, _ = fetch_kb_parallel(
                     user_message, situations, session_id, int(config.get('max_history', 10))
                 )
+                history = external_history if skip_db_history else _
             except Exception as e:
                 logger.error(f"Parallel KB fetch failed: {e}")
-                history = get_history(session_id, limit=int(config.get('max_history', 10)))
+                history = external_history if skip_db_history else get_history(session_id, limit=int(config.get('max_history', 10)))
         else:
-            history = get_history(session_id, limit=int(config.get('max_history', 10)))
+            history = external_history if skip_db_history else get_history(session_id, limit=int(config.get('max_history', 10)))
 
         full_prompt = build_master_prompt(
             user_message, config, history, situations, violations,
@@ -494,7 +501,8 @@ class ChatView(APIView):
             except Exception:
                 reply = "[Error: Could not convert LLM response to string]"
 
-        save_message(session_id, "assistant", reply)
+        if not skip_db_history:
+            save_message(session_id, "assistant", reply)
 
         confidence = self._calculate_confidence(violations, decisions, behaviors)
         reasoning_trace = self._build_reasoning_trace(situations, violations, decisions, behaviors, authority_docs)
@@ -813,6 +821,524 @@ class StatsView(APIView):
 
 
 # =============================================================================
+# TAVUS CVI — Conversational Video Interface
+# =============================================================================
+
+# =============================================================================
+# TAVUS CVI — Conversational Video Interface
+# =============================================================================
+
+class TavusConversationView(APIView):
+    """
+    Create a Tavus CVI conversation. 
+    Tries to wire the PAL to our custom LLM backend so KB + governance runs on every turn.
+    """
+    permission_classes = [IsAdmin | IsChatOperator | IsFlagReviewer]
+
+    def _get_custom_llm_url(self, request):
+        custom_llm_url = request.data.get('custom_llm_url')
+        if not custom_llm_url:
+            custom_llm_url = request.build_absolute_uri('/api/tavus/llm/')
+        if custom_llm_url.startswith('http:'):
+            custom_llm_url = 'https:' + custom_llm_url[5:]
+        return custom_llm_url.rstrip('/')
+
+    def _patch_pal_json_patch(self, pal_id, api_key, custom_llm_url):
+        """Approach 1: RFC 6902 JSON Patch with proper content-type."""
+        secret = getattr(settings, 'TAVUS_CUSTOM_LLM_SECRET', 'tavus-local-secret')
+        patch_ops = [
+            {
+                "op": "replace",
+                "path": "/layers/llm",
+                "value": {
+                    "model": "custom",
+                    "base_url": custom_llm_url,
+                    "api_key": secret,
+                    "speculative_inference": False
+                }
+            }
+        ]
+        try:
+            resp = requests.patch(
+                f"https://tavusapi.com/v2/pals/{pal_id}",
+                headers={
+                    "Content-Type": "application/json-patch+json",  # REQUIRED for RFC 6902
+                    "x-api-key": api_key
+                },
+                json=patch_ops,
+                timeout=15
+            )
+            if resp.status_code in (200, 204):
+                return True, None, resp.status_code
+            # Try to parse error, fallback to status text
+            err = resp.text[:500] or f"HTTP {resp.status_code}"
+            return False, err, resp.status_code
+        except Exception as e:
+            return False, str(e), None
+
+    def _create_pal_with_llm(self, api_key, custom_llm_url, face_id):
+        """Approach 2: Create a brand-new PAL with layers baked in."""
+        secret = getattr(settings, 'TAVUS_CUSTOM_LLM_SECRET', 'tavus-local-secret')
+        payload = {
+            "pal_name": f"GovPal-{uuid.uuid4().hex[:6]}",
+            "system_prompt": (
+                "You are a helpful AI assistant. All responses are generated by a "
+                "custom governance backend that enforces authority rules and knowledge base retrieval."
+            ),
+            "pipeline_mode": "full",
+            "default_face_id": face_id,
+            "layers": {
+                "llm": {
+                    "model": "custom",
+                    "base_url": custom_llm_url,
+                    "api_key": secret,
+                    "speculative_inference": False
+                }
+            }
+        }
+        try:
+            resp = requests.post(
+                "https://tavusapi.com/v2/pals",
+                headers={"Content-Type": "application/json", "x-api-key": api_key},
+                json=payload,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("pal_id"), None, resp.status_code
+            return None, resp.text[:500] or f"HTTP {resp.status_code}", resp.status_code
+        except Exception as e:
+            return None, str(e), None
+
+    def _get_or_create_governance_pal(self, api_key, custom_llm_url, face_id):
+        """
+        Approach 3: Re-use a cached governance PAL so we don't create one per call.
+        Stores the created PAL ID in BotConfig under 'tavus_governance_pal_id'.
+        """
+        config = get_config()
+        cached_pal_id = config.get('tavus_governance_pal_id')
+        
+        if cached_pal_id:
+            # Verify it still exists by trying a lightweight PATCH
+            success, err, code = self._patch_pal_json_patch(cached_pal_id, api_key, custom_llm_url)
+            if success:
+                logger.info(f"[Tavus] Re-using cached governance PAL: {cached_pal_id}")
+                return cached_pal_id, None
+            logger.warning(f"[Tavus] Cached PAL {cached_pal_id} invalid ({code}: {err}), creating new one...")
+
+        # Create fresh
+        new_pal_id, err, code = self._create_pal_with_llm(api_key, custom_llm_url, face_id)
+        if new_pal_id:
+            # Cache it for next time
+            try:
+                BotConfig.objects.update_or_create(
+                    key='tavus_governance_pal_id',
+                    defaults={'value': new_pal_id}
+                )
+                invalidate_config_cache()
+            except Exception as e:
+                logger.warning(f"[Tavus] Failed to cache PAL ID: {e}")
+            return new_pal_id, None
+
+        return None, f"Create PAL failed ({code}): {err}"
+
+    def post(self, request):
+        api_key = getattr(settings, 'TAVUS_API_KEY', '')
+        if not api_key:
+            return Response({"error": "TAVUS_API_KEY not configured"}, status=500)
+
+        face_id = getattr(settings, 'TAVUS_FACE_ID', '')
+        pal_id = getattr(settings, 'TAVUS_PAL_ID', '')
+
+        if not face_id or not pal_id:
+            return Response({
+                "error": "TAVUS_FACE_ID and TAVUS_PAL_ID must be configured",
+                "details": {"face_id_configured": bool(face_id), "pal_id_configured": bool(pal_id)}
+            }, status=500)
+
+        face_id = request.data.get('face_id', face_id)
+        pal_id = request.data.get('pal_id', pal_id)
+        require_auth = request.data.get('require_auth', False)
+        max_participants = request.data.get('max_participants', 2)
+        callback_url = request.data.get('callback_url', '')
+        use_custom_llm = request.data.get('use_custom_llm', True)
+
+        custom_llm_url = self._get_custom_llm_url(request)
+
+        # =================================================================
+        # WIRE THE PAL TO OUR CUSTOM LLM BACKEND
+        # =================================================================
+        if use_custom_llm:
+            # Try 1: Patch existing PAL (fastest, but often fails due to perms)
+            patch_ok, patch_err, patch_code = self._patch_pal_json_patch(pal_id, api_key, custom_llm_url)
+            
+            if patch_ok:
+                logger.info(f"[Tavus] Patched PAL {pal_id} with custom LLM")
+            else:
+                logger.warning(f"[Tavus] PAL patch failed ({patch_code}): {patch_err}")
+                
+                # Try 2: Create new PAL with custom LLM baked in
+                new_pal_id, create_err, create_code = self._create_pal_with_llm(api_key, custom_llm_url, face_id)
+                
+                if new_pal_id:
+                    pal_id = new_pal_id
+                    logger.info(f"[Tavus] Created new PAL {pal_id} with custom LLM")
+                else:
+                    logger.warning(f"[Tavus] PAL create failed ({create_code}): {create_err}")
+                    
+                    # Try 3: Re-use cached governance PAL (survives across restarts)
+                    cached_pal_id, cache_err = self._get_or_create_governance_pal(api_key, custom_llm_url, face_id)
+                    if cached_pal_id:
+                        pal_id = cached_pal_id
+                        logger.info(f"[Tavus] Using cached governance PAL {pal_id}")
+                    else:
+                        # All approaches failed — return detailed diagnostics
+                        return Response({
+                            "error": "Failed to configure PAL with custom LLM layer",
+                            "details": {
+                                "message": (
+                                    "Tavus rejected all 3 attempts to wire the PAL to your backend. "
+                                    "Your API key may lack PAL edit permissions, or the PAL ID may be invalid."
+                                ),
+                                "attempt_1_patch": {
+                                    "status_code": patch_code,
+                                    "error": patch_err or "Empty response body"
+                                },
+                                "attempt_2_create": {
+                                    "status_code": create_code,
+                                    "error": create_err or "Empty response body"
+                                },
+                                "attempt_3_cache": {
+                                    "error": cache_err
+                                },
+                                "pal_id_used": pal_id,
+                                "custom_llm_url": custom_llm_url,
+                                "recommendation": (
+                                    "Either (A) use a Tavus API key with PAL management permissions, or "
+                                    "(B) manually create a PAL in the Tavus dashboard with custom LLM URL "
+                                    f"{custom_llm_url} and set TAVUS_PAL_ID to its ID."
+                                )
+                            }
+                        }, status=502)
+
+        # Build conversation payload — NEVER include 'layers' here
+        payload = {
+            "face_id": face_id,
+            "pal_id": pal_id,
+            "require_auth": require_auth,
+            "max_participants": max_participants,
+        }
+        if callback_url:
+            payload["callback_url"] = callback_url
+
+        logger.info(f"[Tavus] Creating conversation: face_id={face_id[:8]}... pal_id={pal_id[:8]}...")
+
+        try:
+            resp = requests.post(
+                "https://tavusapi.com/v2/conversations",
+                headers={"Content-Type": "application/json", "x-api-key": api_key},
+                json=payload,
+                timeout=15
+            )
+
+            logger.info(f"[Tavus] API response status: {resp.status_code}")
+
+            if resp.status_code != 200:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = {"raw_response": resp.text[:500]}
+                return Response({
+                    "error": f"Tavus API returned {resp.status_code}",
+                    "details": err_body
+                }, status=502)
+
+            data = resp.json()
+            conv_id = data.get("conversation_id", "unknown")
+            logger.info(f"[Tavus] Conversation created: {conv_id}")
+            
+            return Response({
+                "conversation_id": conv_id,
+                "conversation_url": data.get("conversation_url"),
+                "conversation_name": data.get("conversation_name"),
+                "status": data.get("status"),
+                "meeting_token": data.get("meeting_token"),
+                "created_at": data.get("created_at"),
+                "custom_llm_url": custom_llm_url if use_custom_llm else None,
+                "governance_enabled": use_custom_llm,
+                "pal_id_used": pal_id
+            })
+
+        except requests.exceptions.Timeout:
+            return Response({"error": "Tavus API request timed out"}, status=504)
+        except requests.exceptions.ConnectionError as e:
+            return Response({"error": "Cannot connect to Tavus API", "details": str(e)}, status=502)
+        except requests.exceptions.RequestException as e:
+            status_code = 502
+            err_body = {}
+            if hasattr(e, 'response') and e.response is not None:
+                status_code = e.response.status_code
+                try:
+                    err_body = e.response.json()
+                except Exception:
+                    err_body = {"raw_response": getattr(e.response, 'text', str(e))[:500]}
+            return Response({
+                "error": f"Tavus API error: {type(e).__name__}",
+                "details": err_body
+            }, status=status_code if status_code != 200 else 502)
+
+
+class TavusEndConversationView(APIView):
+    """End a Tavus CVI conversation session."""
+    permission_classes = [IsAdmin | IsChatOperator | IsFlagReviewer]
+
+    def post(self, request):
+        conversation_id = request.data.get("conversation_id", "")
+        if not conversation_id:
+            return Response({"error": "conversation_id is required"}, status=400)
+
+        api_key = getattr(settings, 'TAVUS_API_KEY', '')
+        if not api_key:
+            return Response({"error": "TAVUS_API_KEY not configured"}, status=500)
+
+        try:
+            resp = requests.delete(
+                f"https://tavusapi.com/v2/conversations/{conversation_id}",
+                headers={"x-api-key": api_key},
+                timeout=10
+            )
+            resp.raise_for_status()
+            return Response({"status": "ended", "conversation_id": conversation_id})
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Tavus] End conversation failed: {e}")
+            return Response({"error": str(e)}, status=502)
+
+
+class TavusLLMCallbackView(APIView):
+    permission_classes = []
+    authentication_classes = []
+
+    def _verify_tavus_request(self, request):
+        expected_secret = getattr(settings, 'TAVUS_CUSTOM_LLM_SECRET', 'tavus-local-secret')
+        provided_secret = request.headers.get('X-Tavus-Secret', request.headers.get('Authorization', ''))
+        if provided_secret.startswith('Bearer '):
+            provided_secret = provided_secret[7:]
+        if provided_secret != expected_secret:
+            logger.warning(f"[Tavus LLM] Invalid secret from {request.META.get('REMOTE_ADDR')}")
+            return False
+        return True
+
+    def _make_sse_chunk(self, chunk_id, model, delta_content=None, role=None, finish_reason=None):
+        """Build a single OpenAI-compatible SSE chunk."""
+        delta = {}
+        if role:
+            delta["role"] = role
+        if delta_content is not None:
+            delta["content"] = delta_content
+        
+        data = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason
+            }]
+        }
+        return f"data: {json.dumps(data)}\n\n"
+
+    def post(self, request):
+        # 1. SECURITY
+        if not self._verify_tavus_request(request):
+            return Response({"error": "Unauthorized"}, status=401)
+
+        # 2. LOG RAW PAYLOAD
+        raw_body = json.dumps(request.data, indent=2)
+        logger.info(f"[Tavus LLM] === RAW PAYLOAD ===\n{raw_body[:2000]}")
+
+        stream = request.data.get("stream", False)
+        req_model = request.data.get("model", "custom")
+        logger.info(f"[Tavus LLM] Request: stream={stream}, model={req_model}")
+
+        # 3. EXTRACT MESSAGE AND HISTORY
+        messages = request.data.get("messages", [])
+        session_id = (
+            request.data.get("conversation_id")
+            or request.data.get("session_id")
+            or f"tavus_{uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(messages, sort_keys=True))}"
+        )
+        
+        # Build history from Tavus messages (exclude current user message)
+        tavus_history = []
+        for msg in messages:
+            if msg.get("role") in ("user", "assistant"):
+                tavus_history.append({"role": msg["role"], "content": msg.get("content", "")})
+        if tavus_history and tavus_history[-1]["role"] == "user":
+            tavus_history = tavus_history[:-1]
+        
+        # Extract last user message
+        user_message = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+        
+        if isinstance(user_message, list):
+            text_parts = []
+            for block in user_message:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            user_message = "".join(text_parts).strip()
+
+        chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+        # If no user message, stream a fallback
+        if not user_message:
+            logger.warning("[Tavus LLM] No user message found")
+            def fallback_stream():
+                yield self._make_sse_chunk(chunk_id, req_model, role="assistant")
+                yield self._make_sse_chunk(chunk_id, req_model, delta_content="I didn't catch that. Could you please repeat?")
+                yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
+                yield "data: [DONE]\n\n"
+            return StreamingHttpResponse(fallback_stream(), content_type='text/event-stream')
+
+        logger.info(f"[Tavus LLM] User: '{user_message[:120]}...' | Session: {session_id} | History: {len(tavus_history)} turns")
+
+        # 4. RUN GOVERNANCE PIPELINE
+        chat_view = ChatView()
+        
+        try:
+            result = chat_view._process_chat(
+                user_message=user_message,
+                session_id=f"tavus_{session_id}",
+                use_kb=True,
+                skip_db_history=True,
+                external_history=tavus_history
+            )
+        except Exception as e:
+            logger.error(f"[Tavus LLM] _process_chat CRASHED: {e}\n{traceback.format_exc()}")
+            def error_stream():
+                yield self._make_sse_chunk(chunk_id, req_model, role="assistant")
+                yield self._make_sse_chunk(chunk_id, req_model, delta_content="I'm experiencing a technical issue. Please try again.")
+                yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
+                yield "data: [DONE]\n\n"
+            return StreamingHttpResponse(error_stream(), content_type='text/event-stream')
+
+        reply = result.get("reply", "I'm sorry, I couldn't process that request.")
+        thoughts = result.get("thoughts", {})
+        
+        logger.info(
+            f"[Tavus LLM] === GOVERNANCE REPORT ===\n"
+            f"  Decisions: {result.get('decisions_retrieved', 0)} | "
+            f"Behaviors: {result.get('behaviors_applied', 0)} | "
+            f"Violations: {result.get('authority_violations', 0)} | "
+            f"Model: {result.get('model', 'unknown')} | "
+            f"Reply: {reply[:100]}..."
+        )
+
+        # 5. STREAM THE RESPONSE AS SSE
+        def event_stream():
+            # First chunk: role
+            yield self._make_sse_chunk(chunk_id, req_model, role="assistant")
+            
+            # Content chunks (split into ~15-20 char chunks for natural TTS pacing)
+            chunk_size = 20
+            for i in range(0, len(reply), chunk_size):
+                text_chunk = reply[i:i + chunk_size]
+                yield self._make_sse_chunk(chunk_id, req_model, delta_content=text_chunk)
+            
+            # Final chunk: stop
+            yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
+            yield "data: [DONE]\n\n"
+
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'
+        return response
+
+
+# =============================================================================
+# NEW: DEBUG ENDPOINT — TEST YOUR KB WITHOUT TAVUS
+# =============================================================================
+
+class TavusLLMDebugView(APIView):
+    """
+    POST a test message here to see exactly what your KB returns.
+    This bypasses Tavus entirely so you can verify the pipeline.
+    
+    Body: {"message": "What is our refund policy?", "session_id": "test123"}
+    """
+    permission_classes = [IsAdmin | IsChatOperator]
+
+    def post(self, request):
+        user_message = request.data.get("message", "").strip()
+        session_id = request.data.get("session_id", "debug_default")
+        
+        if not user_message:
+            return Response({"error": "message is required"}, status=400)
+
+        logger.info(f"[Tavus Debug] Testing KB for: '{user_message[:100]}'")
+
+        chat_view = ChatView()
+        try:
+            result = chat_view._process_chat(
+                user_message=user_message,
+                session_id=f"debug_{session_id}",
+                use_kb=True
+            )
+        except Exception as e:
+            logger.error(f"[Tavus Debug] Pipeline crashed: {e}\n{traceback.format_exc()}")
+            return Response({
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }, status=500)
+
+        # Return the FULL internal state so you can inspect everything
+        return Response({
+            "reply": result.get("reply"),
+            "kb_stats": {
+                "decisions_retrieved": result.get("decisions_retrieved", 0),
+                "behaviors_applied": result.get("behaviors_applied", 0),
+                "authority_violations": result.get("authority_violations", 0),
+                "has_forbidden": result.get("has_forbidden", False),
+                "has_conditional": result.get("has_conditional", False),
+            },
+            "thoughts": result.get("thoughts", {}),
+            "raw_prompt_preview": result.get("thoughts", {}).get("prompt_preview", "N/A"),
+            "references": result.get("thoughts", {}).get("references", [])
+        })
+
+class TavusWebhookView(APIView):
+    """
+    Receive Tavus post-conversation webhooks (transcripts, summaries, events).
+    This is NOT for real-time LLM responses — use TavusLLMCallbackView for that.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request):
+        event_type = request.data.get("event_type", "unknown")
+        conversation_id = request.data.get("conversation_id", "unknown")
+
+        logger.info(f"[Tavus Webhook] Event: {event_type} | Conversation: {conversation_id}")
+
+        if event_type == "application.transcription_ready":
+            transcript = request.data.get("transcript", {})
+            logger.info(f"[Tavus Webhook] Transcript received for {conversation_id}")
+
+        elif event_type == "application.perception_analysis":
+            logger.info(f"[Tavus Webhook] Perception analysis for {conversation_id}")
+
+        elif event_type == "conversation.ended":
+            logger.info(f"[Tavus Webhook] Conversation ended: {conversation_id}")
+
+        return Response({"status": "received"})
+
+# =============================================================================
 # AUDIO UTILITIES
 # =============================================================================
 
@@ -1101,7 +1627,7 @@ class TTSView(APIView):
                     done_event.set()
                 elif msg_type == "flush_done":
                     done_event.set()
-                elif msg_type == "error":
+                elif msg_type == "type" == "error":
                     error_msg[0] = data.get("message", "Unknown Cartesia error")
                     done_event.set()
 
