@@ -17,7 +17,7 @@ class Command(BaseCommand):
             ('denied_topics', 'hate speech, violence, illegal activities, personal medical advice, financial commitments, contract signing, unsupervised autonomous actions, exceeding advisory authority, ungrounded speculation'),
             ('response_rules', 'Always show reasoning and cite evidence sources. If uncertain, explicitly state so and flag for review. Never give legal advice without disclaiming. Respect authority hierarchy and the Never List. Ask clarifying questions when information is missing. Every statement must be traceable to a knowledge source.'),
             ('max_history', '10'),
-            ('temperature', '0.3'),
+            ('temperature', '0.0'),
             ('company_name', 'DTOS'),
             ('margin_threshold', '85'),
             ('auto_flag_conditional', 'true'),

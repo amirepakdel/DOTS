@@ -746,7 +746,14 @@ async function processVoiceViaHTTP(audioBlob, mimeType) {
     const formData = new FormData();
     formData.append('audio', audioBlob, `recording.${ext}`);
     try {
-        const res = await fetch('/api/stt', { method: 'POST', body: formData });
+        const res = await fetch('/api/stt', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: {
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: formData 
+        });
         const data = await res.json();
         if (data.error) { showToast(`STT Error: ${data.error}`, 'error'); voiceLabel.textContent = 'Hold to speak to DTOS'; return; }
         const transcript = data.transcript?.trim();
@@ -1571,7 +1578,15 @@ async function saveConfig() {
     saveConfigBtn.disabled = true;
     saveConfigBtn.innerHTML = '<span class="spinner"></span> Saving...';
     try {
-        await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+        await fetch('/api/config', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify(config) 
+        });
         saveConfigBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Saved!';
         showToast('Governance configuration saved successfully', 'success');
         setTimeout(() => { 
@@ -1628,7 +1643,12 @@ async function playTTS(text, btnElement) {
 
     try {
         const res = await fetch('/api/tts', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
             body: JSON.stringify({ text })
         });
         if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'TTS failed'); }
@@ -2086,7 +2106,15 @@ function quickAsk(text) {
 
 async function clearChat() {
     try {
-        await fetch('/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }) });
+        await fetch('/api/clear', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify({ session_id: sessionId }) 
+        });
     } catch (error) { console.warn('Failed to clear session on server:', error); }
     chatBox.innerHTML = `
         <div class="message assistant welcome">
@@ -2200,7 +2228,15 @@ async function addDecision() {
     if (hasError) return;
     addDecBtn.disabled = true; addDecBtn.innerHTML = '<span class="spinner"></span> Adding...';
     try {
-        await fetch('/api/decisions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        await fetch('/api/decisions', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify(data) 
+        });
         decQuestion.value = ''; decContext.value = ''; decAnswer.value = ''; decReasoning.value = '';
         loadDecisions(decFilter.value); loadStats();
         showToast('Governance decision pattern added', 'success');
@@ -2212,7 +2248,16 @@ async function addDecision() {
     }
 }
 
-async function toggleDecision(id) { await fetch(`/api/decisions/${id}/toggle`, { method: 'POST' }); loadDecisions(decFilter.value); }
+async function toggleDecision(id) { 
+    await fetch(`/api/decisions/${id}/toggle`, { 
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken')
+        }
+    }); 
+    loadDecisions(decFilter.value); 
+}
 async function deleteDecision(id) { if (!confirm('Delete this governance decision pattern?')) return; await fetch(`/api/decisions/${id}`, { method: 'DELETE' }); loadDecisions(decFilter.value); loadStats(); }
 
 // === BEHAVIORS ===
@@ -2284,7 +2329,15 @@ async function addBehavior() {
     if (hasError) return;
     addBehBtn.disabled = true; addBehBtn.innerHTML = '<span class="spinner"></span> Adding...';
     try {
-        await fetch('/api/behaviors', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        await fetch('/api/behaviors', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify(data) 
+        });
         behSituation.value = ''; behTone.value = ''; behExample.value = ''; behDo.value = ''; behDont.value = '';
         loadBehaviors(); loadStats();
         showToast('Persona behavior style added', 'success');
@@ -2296,7 +2349,16 @@ async function addBehavior() {
     }
 }
 
-async function toggleBehavior(id) { await fetch(`/api/behaviors/${id}/toggle`, { method: 'POST' }); loadBehaviors(); }
+async function toggleBehavior(id) { 
+    await fetch(`/api/behaviors/${id}/toggle`, { 
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken')
+        }
+    }); 
+    loadBehaviors(); 
+}
 async function deleteBehavior(id) { if (!confirm('Delete this persona behavior?')) return; await fetch(`/api/behaviors/${id}`, { method: 'DELETE' }); loadBehaviors(); loadStats(); }
 
 // === AUTHORITY ===
@@ -2367,7 +2429,15 @@ async function addAuthority() {
     if (hasError) return;
     addAuthBtn.disabled = true; addAuthBtn.innerHTML = '<span class="spinner"></span> Adding...';
     try {
-        await fetch('/api/authority', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        await fetch('/api/authority', { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify(data) 
+        });
         authAction.value = ''; authCondition.value = ''; authFallback.value = '';
         loadAuthority(); loadStats();
         showToast('Authority and safety rule added', 'success');
@@ -2379,7 +2449,16 @@ async function addAuthority() {
     }
 }
 
-async function toggleAuthority(id) { await fetch(`/api/authority/${id}/toggle`, { method: 'POST' }); loadAuthority(); }
+async function toggleAuthority(id) { 
+    await fetch(`/api/authority/${id}/toggle`, { 
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken')
+        }
+    }); 
+    loadAuthority(); 
+}
 async function deleteAuthority(id) { if (!confirm('Delete this authority and safety rule?')) return; await fetch(`/api/authority/${id}`, { method: 'DELETE' }); loadAuthority(); loadStats(); }
 
 // === REVIEW / FLAGS ===
@@ -2501,14 +2580,32 @@ async function resolveFlag(flagId) {
         payload.condition = document.getElementById(`cfAuthCond-${flagId}`).value;
     }
     try {
-        await fetch(`/api/flags/${flagId}/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        await fetch(`/api/flags/${flagId}/resolve`, { 
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }, 
+            body: JSON.stringify(payload) 
+        });
         loadFlags(); loadStats(); showToast('Audit flag resolved and governance answer saved', 'success');
     } catch (e) { showToast('Failed to resolve', 'error'); }
 }
 
 async function dismissFlag(flagId) {
     if (!confirm('Dismiss this audit flag?')) return;
-    try { await fetch(`/api/flags/${flagId}/dismiss`, { method: 'POST' }); loadFlags(); loadStats(); }
+    try { 
+        await fetch(`/api/flags/${flagId}/dismiss`, { 
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'X-CSRFToken': getCookie('csrftoken')
+            }
+        }); 
+        loadFlags(); 
+        loadStats(); 
+    }
     catch (e) { showToast('Failed to dismiss audit flag', 'error'); }
 }
 
@@ -2516,7 +2613,12 @@ async function manualFlag() {
     if (!lastQuestion) { showToast('No interaction to flag for audit', 'error'); return; }
     try {
         await fetch('/api/flags', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', 
+            credentials: 'include',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
             body: JSON.stringify({ session_id: sessionId, question: lastQuestion, ai_response: lastAiResponse, context: lastContext, flag_reason: 'manual' })
         });
         showToast('Flagged for audit review', 'warning'); loadStats();

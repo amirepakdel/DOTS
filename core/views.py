@@ -47,6 +47,22 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+def _extract_stream_text(chunk):
+    """Normalize an LLM stream chunk to a plain string (handles OpenAI list deltas)."""
+    raw = getattr(chunk, 'content', None)
+    if raw is None:
+        return str(chunk)
+    if isinstance(raw, list):
+        parts = []
+        for block in raw:
+            if isinstance(block, dict) and block.get('type') == 'text':
+                parts.append(block.get('text', ''))
+            elif isinstance(block, str):
+                parts.append(block)
+        return ''.join(parts)
+    return str(raw)
+
+
 
 class IndexView(LoginRequiredMixin,TemplateView):
     template_name = 'index.html'
@@ -568,7 +584,7 @@ class ChatView(APIView):
                     "response_build": {
                         "status": "completed",
                         "model": model_used,
-                        "temperature": 0.3,
+                        "temperature": 0.0,
                         "complexity_tier": complexity
                     }
                 }
@@ -638,7 +654,8 @@ class ChatStreamView(APIView):
             try:
                 if complexity == "fast" and not has_forbidden:
                     for chunk in llm.stream(full_prompt):
-                        text = getattr(chunk, 'content', str(chunk)) or ""
+                        text = _extract_stream_text(chunk) or ""
+
                         if text:
                             full_reply += text
                             yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
@@ -665,14 +682,16 @@ class ChatStreamView(APIView):
                     except Exception as e:
                         logger.error(f"Anthropic stream error: {e}")
                         for chunk in llm.stream(full_prompt):
-                            text = getattr(chunk, 'content', str(chunk)) or ""
+                            text = _extract_stream_text(chunk) or ""
+
                             if text:
                                 full_reply += text
                                 yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
                         model_used = "gpt-4o-mini (fallback)"
                 else:
                     for chunk in llm.stream(full_prompt):
-                        text = getattr(chunk, 'content', str(chunk)) or ""
+                        text = _extract_stream_text(chunk) or ""
+
                         if text:
                             full_reply += text
                             yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
@@ -1115,9 +1134,22 @@ class TavusEndConversationView(APIView):
 
 
 class TavusLLMCallbackView(APIView):
+    """
+    Tavus CVI custom LLM callback.
+
+    NOW USES THE EXACT SAME KNOWLEDGE-RETRIEVAL & STREAMING PIPELINE AS ChatStreamView:
+    - Parallel KB fetch via fetch_kb_parallel()
+    - Model tier routing via estimate_complexity()
+    - Direct LLM streaming (not buffered _process_chat)
+    - Same authority / situation / behavior logic
+    - OpenAI-compatible SSE chunks for Tavus TTS
+    """
     permission_classes = []
     authentication_classes = []
 
+    # ------------------------------------------------------------------
+    # Tavus SSE helpers (unchanged)
+    # ------------------------------------------------------------------
     def _verify_tavus_request(self, request):
         expected_secret = getattr(settings, 'TAVUS_CUSTOM_LLM_SECRET', 'tavus-local-secret')
         provided_secret = request.headers.get('X-Tavus-Secret', request.headers.get('Authorization', ''))
@@ -1129,13 +1161,11 @@ class TavusLLMCallbackView(APIView):
         return True
 
     def _make_sse_chunk(self, chunk_id, model, delta_content=None, role=None, finish_reason=None):
-        """Build a single OpenAI-compatible SSE chunk."""
         delta = {}
         if role:
             delta["role"] = role
         if delta_content is not None:
             delta["content"] = delta_content
-        
         data = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
@@ -1149,6 +1179,117 @@ class TavusLLMCallbackView(APIView):
         }
         return f"data: {json.dumps(data)}\n\n"
 
+    # ------------------------------------------------------------------
+    # Governance helpers — copied from ChatStreamView so behaviour is identical
+    # ------------------------------------------------------------------
+    def _calculate_confidence(self, violations, decisions, behaviors):
+        score = 75
+        if any(v['allowed'] == 'no' for v in violations):
+            score = 95
+        elif any(v['allowed'] == 'conditional' for v in violations):
+            score = 65
+        score += min(len(decisions) * 5, 15)
+        score += min(len(behaviors) * 3, 6)
+        return min(score, 100)
+
+    def _build_reasoning_trace(self, situations, violations, decisions, behaviors, authority_docs=None):
+        trace_parts = []
+        trace_parts.append("=== Stage 1: Input Analysis ===")
+        trace_parts.append("Message received and validated. History context loaded.")
+        trace_parts.append("\n=== Stage 2: Situation Detection ===")
+        if situations:
+            trace_parts.append(f"Detected {len(situations)} situation(s): {', '.join(situations)}.")
+            for sit in situations:
+                if sit == 'governance_risk':
+                    trace_parts.append("  → Governance risk detected: stricter evidence requirements activated.")
+                elif sit == 'authority_boundary':
+                    trace_parts.append("  → Authority boundary crossed: authority rule engine activated.")
+                elif sit == 'high_stakes_meeting':
+                    trace_parts.append("  → High-stakes context: formal tone and documentation required.")
+                elif sit == 'hostile':
+                    trace_parts.append("  → Hostile tone detected: de-escalation protocols engaged.")
+                elif sit == 'legal':
+                    trace_parts.append("  → Legal context flagged: recommend human legal review.")
+        else:
+            trace_parts.append("No specific situations detected. Default advisory mode.")
+        trace_parts.append("\n=== Stage 3: Authority Check ===")
+        trace_parts.append("Layer 1 (Keyword Match): Scanned all active authority rules against message content.")
+        if violations:
+            for v in violations:
+                status = "FORBIDDEN" if v['allowed'] == 'no' else "CONDITIONAL" if v['allowed'] == 'conditional' else "ALLOWED"
+                trace_parts.append(f"  → MATCH: Rule '{v['rule']}' → Status: {status}")
+                trace_parts.append(f"    Condition: {v['condition']}")
+                trace_parts.append(f"    Fallback: {v['fallback']}")
+            if any(v['allowed'] == 'no' for v in violations):
+                trace_parts.append("  → CRITICAL: Hard FORBIDDEN rule triggered. Autonomous refusal required.")
+        else:
+            trace_parts.append("  → No keyword violations found.")
+        trace_parts.append("\nLayer 2 (Semantic Search): Queried vectorstore for semantically similar authority rules.")
+        if authority_docs:
+            trace_parts.append(f"  → Found {len(authority_docs)} relevant rule(s) via embedding similarity.")
+            for i, doc in enumerate(authority_docs, 1):
+                trace_parts.append(f"    [{i}] {doc.page_content[:120]}...")
+        else:
+            trace_parts.append("  → No additional semantic matches above threshold.")
+        trace_parts.append("\n=== Stage 4: Knowledge Base Retrieval ===")
+        if decisions:
+            trace_parts.append(f"Retrieved {len(decisions)} decision pattern(s) from PGVector:")
+            for i, d in enumerate(decisions, 1):
+                src = d.metadata.get('source', 'unknown')
+                trace_parts.append(f"  [{i}] {src} | {d.page_content[:100]}...")
+        else:
+            trace_parts.append("No relevant decision patterns retrieved.")
+        if behaviors:
+            trace_parts.append(f"\nApplied {len(behaviors)} behavior style(s):")
+            for b in behaviors:
+                trace_parts.append(f"  → {b['situation']} | Tone: {b['tone']}")
+        else:
+            trace_parts.append("No behavior styles matched.")
+        trace_parts.append("\n=== Stage 5: Response Build ===")
+        trace_parts.append("Master prompt assembled with all governance context injected.")
+        trace_parts.append("LLM invoked with temperature=0.3 (deterministic mode).")
+        return "\n".join(trace_parts)
+
+    def _build_references(self, decisions, behaviors, violations, authority_docs=None):
+        refs = []
+        for d in decisions:
+            refs.append({
+                "id": f"dec-{d.metadata.get('id', 'unknown')}",
+                "type": "decision",
+                "title": d.page_content[:60] + "..." if len(d.page_content) > 60 else d.page_content,
+                "score": 0.85,
+                "source": d.metadata.get('source', 'unknown')
+            })
+        for v in violations:
+            refs.append({
+                "id": f"auth-{v['id']}",
+                "type": "authority",
+                "title": v['rule'],
+                "score": 0.94,
+                "allowed": v['allowed'],
+                "condition": v['condition']
+            })
+        for doc in (authority_docs or []):
+            refs.append({
+                "id": f"auth-sem-{doc.metadata.get('id', 'unknown')}",
+                "type": "authority",
+                "title": doc.page_content[:60] + "...",
+                "score": 0.82,
+                "match_type": "semantic"
+            })
+        for b in behaviors:
+            refs.append({
+                "id": f"beh-{b['id']}",
+                "type": "behavior",
+                "title": b['situation'][:60] + "..." if len(b['situation']) > 60 else b['situation'],
+                "score": 0.76,
+                "tone": b['tone']
+            })
+        return refs
+
+    # ------------------------------------------------------------------
+    # Main handler — now mirrors ChatStreamView.post() line-for-line
+    # ------------------------------------------------------------------
     def post(self, request):
         # 1. SECURITY
         if not self._verify_tavus_request(request):
@@ -1162,29 +1303,27 @@ class TavusLLMCallbackView(APIView):
         req_model = request.data.get("model", "custom")
         logger.info(f"[Tavus LLM] Request: stream={stream}, model={req_model}")
 
-        # 3. EXTRACT MESSAGE AND HISTORY
+        # 3. EXTRACT MESSAGE AND HISTORY (Tavus-specific)
         messages = request.data.get("messages", [])
         session_id = (
             request.data.get("conversation_id")
             or request.data.get("session_id")
             or f"tavus_{uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(messages, sort_keys=True))}"
         )
-        
-        # Build history from Tavus messages (exclude current user message)
+        # Tavus message history (exclude current user turn)
         tavus_history = []
         for msg in messages:
             if msg.get("role") in ("user", "assistant"):
                 tavus_history.append({"role": msg["role"], "content": msg.get("content", "")})
         if tavus_history and tavus_history[-1]["role"] == "user":
             tavus_history = tavus_history[:-1]
-        
+
         # Extract last user message
         user_message = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 user_message = msg.get("content", "")
                 break
-        
         if isinstance(user_message, list):
             text_parts = []
             for block in user_message:
@@ -1196,7 +1335,7 @@ class TavusLLMCallbackView(APIView):
 
         chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-        # If no user message, stream a fallback
+        # Empty message fallback
         if not user_message:
             logger.warning("[Tavus LLM] No user message found")
             def fallback_stream():
@@ -1208,52 +1347,126 @@ class TavusLLMCallbackView(APIView):
 
         logger.info(f"[Tavus LLM] User: '{user_message[:120]}...' | Session: {session_id} | History: {len(tavus_history)} turns")
 
-        # 4. RUN GOVERNANCE PIPELINE
-        chat_view = ChatView()
-        
-        try:
-            result = chat_view._process_chat(
-                user_message=user_message,
-                session_id=f"tavus_{session_id}",
-                use_kb=True,
-                skip_db_history=True,
-                external_history=tavus_history
-            )
-        except Exception as e:
-            logger.error(f"[Tavus LLM] _process_chat CRASHED: {e}\n{traceback.format_exc()}")
-            def error_stream():
+        # 4. GOVERNANCE PIPELINE — EXACT SAME ORDER AS ChatStreamView
+        config = get_config()
+        situations = detect_situation(user_message)
+        violations = check_authority(user_message)
+        has_forbidden = any(v['allowed'] == 'no' for v in violations)
+        has_conditional = any(v['allowed'] == 'conditional' for v in violations)
+
+        # 5. STREAMING RESPONSE GENERATOR
+        def event_stream():
+            # --- forbidden fast-path (same as ChatStreamView) ---
+            if has_forbidden:
+                fallback = violations[0].get('fallback', 'This action is not permitted.')
                 yield self._make_sse_chunk(chunk_id, req_model, role="assistant")
-                yield self._make_sse_chunk(chunk_id, req_model, delta_content="I'm experiencing a technical issue. Please try again.")
+                yield self._make_sse_chunk(chunk_id, req_model, delta_content=fallback)
                 yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
                 yield "data: [DONE]\n\n"
-            return StreamingHttpResponse(error_stream(), content_type='text/event-stream')
+                return
 
-        reply = result.get("reply", "I'm sorry, I couldn't process that request.")
-        thoughts = result.get("thoughts", {})
-        
-        logger.info(
-            f"[Tavus LLM] === GOVERNANCE REPORT ===\n"
-            f"  Decisions: {result.get('decisions_retrieved', 0)} | "
-            f"Behaviors: {result.get('behaviors_applied', 0)} | "
-            f"Violations: {result.get('authority_violations', 0)} | "
-            f"Model: {result.get('model', 'unknown')} | "
-            f"Reply: {reply[:100]}..."
-        )
+            # --- save user message (same as ChatStreamView) ---
+            save_message(session_id, "user", user_message)
 
-        # 5. STREAM THE RESPONSE AS SSE
-        def event_stream():
-            # First chunk: role
+            # --- parallel KB fetch — EXACT SAME CALL AS ChatStreamView ---
+            decisions, behaviors, authority_docs, _ = [], [], [], []
+            try:
+                decisions, behaviors, authority_docs, _ = fetch_kb_parallel(
+                    user_message, situations, session_id, int(config.get('max_history', 10))
+                )
+            except Exception as e:
+                logger.error(f"Parallel KB fetch failed in Tavus stream: {e}")
+
+            # Use Tavus-provided history instead of DB history (Tavus-specific)
+            history = tavus_history
+
+            full_prompt = build_master_prompt(
+                user_message, config, history, situations, violations,
+                decisions, behaviors, authority_docs=authority_docs,
+                include_reasoning_in_output=False
+            )
+
+            complexity = estimate_complexity(user_message, situations, violations)
+            full_reply = ""
+            model_used = "unknown"
+
+            # --- first SSE chunk: role ---
             yield self._make_sse_chunk(chunk_id, req_model, role="assistant")
-            
-            # Content chunks (split into ~15-20 char chunks for natural TTS pacing)
-            chunk_size = 20
-            for i in range(0, len(reply), chunk_size):
-                text_chunk = reply[i:i + chunk_size]
-                yield self._make_sse_chunk(chunk_id, req_model, delta_content=text_chunk)
-            
-            # Final chunk: stop
-            yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
-            yield "data: [DONE]\n\n"
+
+            # --- LLM streaming — EXACT SAME TIER LOGIC AS ChatStreamView ---
+            try:
+                if complexity == "fast" and not has_forbidden:
+                    for chunk in llm.stream(full_prompt):
+                        text = _extract_stream_text(chunk) or ""
+
+                        if text:
+                            full_reply += text
+                            yield self._make_sse_chunk(chunk_id, req_model, delta_content=text)
+                    model_used = "gpt-4o-mini-fast"
+
+                elif settings.ANTHROPIC_API_KEY:
+                    try:
+                        for chunk in llm_anthropic.stream(full_prompt):
+                            text = ""
+                            if hasattr(chunk, 'content'):
+                                if isinstance(chunk.content, list):
+                                    for block in chunk.content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            text += block.get("text", "")
+                                        elif isinstance(block, str):
+                                            text += block
+                                else:
+                                    text = str(chunk.content)
+                            else:
+                                text = str(chunk)
+                            if text:
+                                full_reply += text
+                                yield self._make_sse_chunk(chunk_id, req_model, delta_content=text)
+                        model_used = "claude-3-5-sonnet"
+                    except Exception as e:
+                        logger.error(f"Anthropic stream error: {e}")
+                        for chunk in llm.stream(full_prompt):
+                            text = _extract_stream_text(chunk) or ""
+
+                            if text:
+                                full_reply += text
+                                yield self._make_sse_chunk(chunk_id, req_model, delta_content=text)
+                        model_used = "gpt-4o-mini (fallback)"
+                else:
+                    for chunk in llm.stream(full_prompt):
+                        text = _extract_stream_text(chunk) or ""
+
+                        if text:
+                            full_reply += text
+                            yield self._make_sse_chunk(chunk_id, req_model, delta_content=text)
+                    model_used = "gpt-4o-mini"
+
+            except Exception as e:
+                error_text = f"Error: {str(e)}"
+                logger.error(f"Streaming LLM error in Tavus: {e}")
+                yield self._make_sse_chunk(chunk_id, req_model, delta_content=error_text)
+
+            finally:
+                # --- save assistant reply (same as ChatStreamView) ---
+                if full_reply:
+                    save_message(session_id, "assistant", full_reply)
+
+                # --- build thoughts / references for logging (same as ChatStreamView) ---
+                confidence = self._calculate_confidence(violations, decisions, behaviors)
+                reasoning_trace = self._build_reasoning_trace(situations, violations, decisions, behaviors, authority_docs)
+                references = self._build_references(decisions, behaviors, violations, authority_docs)
+
+                logger.info(
+                    f"[Tavus LLM] === GOVERNANCE REPORT ===\n"
+                    f"  Decisions: {len(decisions)} | "
+                    f"Behaviors: {len(behaviors)} | "
+                    f"Violations: {len(violations)} | "
+                    f"Model: {model_used} | "
+                    f"Reply: {full_reply[:100]}..."
+                )
+
+                yield self._make_sse_chunk(chunk_id, req_model, finish_reason="stop")
+                yield "data: [DONE]\n\n"
 
         response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
         response['Cache-Control'] = 'no-cache'

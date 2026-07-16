@@ -107,7 +107,6 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.TokenAuthentication',  # or JWT
     ],
-    'DEFAULT_PERMISSION_CLASSES': [],
     'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
@@ -122,8 +121,8 @@ CARTESIA_API_KEY = os.getenv('CARTESIA_API_KEY', '')
 LLM_CONFIG = {
     'openai_model': 'gpt-4o-mini',
     'anthropic_model': 'claude-sonnet-5',
-    'temperature': 0.3,
-    'max_tokens': 4096,
+    'temperature': 0.0,
+    'max_tokens': 256,
 }
 
 LOGGING = {
@@ -144,7 +143,7 @@ LOGGING = {
 
 TAVUS_API_KEY = "58b7edfe949d46199ac990d2d091c4c2"
 TAVUS_FACE_ID = "re3fd4adeafd"
-TAVUS_PAL_ID = "p9b7ab8db1c6"
+TAVUS_PAL_ID = "p4a42600a595"
 
 TAVUS_CUSTOM_LLM_SECRET = os.getenv("TAVUS_CUSTOM_LLM_SECRET", "change-me-in-production")
 
